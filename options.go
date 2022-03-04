@@ -8,7 +8,7 @@ import (
 
 // Options keeps the settings to setup dqueue.
 type Options struct {
-	// Queue name
+	// queue name
 	Name string
 
 	// The settings to setup redis connection.
@@ -16,9 +16,11 @@ type Options struct {
 
 	// Daemon thread num, default is 1
 	DaemonWorkerNum int
-	// Daemon routine interval, default is 100ms
+	// Daemon routine interval, default is 100ms, 0 for keep polling
 	DaemonWorkerInterval time.Duration
 
 	// Pull message worker num, default is 1
 	ConsumeWorkerNum int
+
+	EnableCancel bool
 }

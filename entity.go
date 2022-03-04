@@ -5,6 +5,7 @@ package dqueue
 import "time"
 
 type ProducerMessage struct {
+	Payload   []byte
 	Value     interface{}
-	DeliverAt time.Time
+	DeliverAt *time.Time
 }

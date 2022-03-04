@@ -7,33 +7,41 @@ import (
 	"github.com/go-redis/redis/v8"
 )
 
-func (d *DQueue) daemon() {
-	for i := 0; i < d.daemonWorkerNum; i++ {
+func (q *queue) daemon() {
+	for i := 0; i < q.daemonWorkerNum; i++ {
 		go func() {
-			ticker := time.NewTicker(d.daemonWorkerInterval)
+			if q.daemonWorkerInterval == 0 {
+				for {
+					delayToReady(q.rdb.c, time.Now(), q.name)
+				}
+			}
+
+			ticker := time.NewTicker(q.daemonWorkerInterval)
 			for {
-				go delayToReadySingle(d.rdb, time.Now(), d.name)
+				go delayToReady(q.rdb.c, time.Now(), q.name)
 				<-ticker.C
 			}
 		}()
 	}
 }
 
-func delayToReadySingle(rdb *redis.Client, t time.Time, name string) error {
-	dq := delayQueuePrefix + name
-	rq := readyQueuePrefix + name
+func delayToReady(rdb *redis.Client, t time.Time, name string) (int, error) {
+	dq := delayPrefix + name
+	rq := readyPrefix + name
 
 	script := redis.NewScript(`
-local message = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', ARGV[1], 'WITHSCORES', 'LIMIT', 0, 1);
-if #message > 0 then
-  redis.call('ZREM', KEYS[1], message[1]);
-  redis.call('RPUSH', KEYS[2], message[1]);
-  return message;
+local members = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', ARGV[1], 'WITHSCORES', 'LIMIT', 0, 1000);
+if #members > 0 then
+  for key, value in ipairs(members)
+  do
+    redis.call('ZREM', KEYS[1], value);
+    redis.call('RPUSH', KEYS[2], value);
+  end
+  return #members;
 else
-  return {};
+  return 0;
 end
 `)
 
-	_, err := script.Run(context.Background(), rdb, []string{dq, rq}, t.UnixMilli()).StringSlice() // [member, score]
-	return err
+	return script.Run(context.Background(), rdb, []string{dq, rq}, t.UnixMilli()).Int()
 }

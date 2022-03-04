@@ -1,14 +1,12 @@
 syntax = "proto3";
 package entity;
 
-
-import "google/protobuf/struct.proto";
 import "google/protobuf/timestamp.proto";
 
 option go_package = "github.com/9ft/dqueue";
 
 message Message {
-  google.protobuf.Value payload = 1;
+  bytes payload = 1;
   string id = 2;
   int32 retried = 3;
   google.protobuf.Timestamp produce_time = 4;

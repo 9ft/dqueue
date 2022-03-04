@@ -12,122 +12,160 @@ import (
 	"github.com/go-redis/redis/v8"
 	"github.com/golang/protobuf/proto"
 	"github.com/google/uuid"
-	"google.golang.org/protobuf/types/known/structpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
-const (
-	readyQueuePrefix = "dq:ready:"
-	delayQueuePrefix = "dq:delay:"
-)
-
-// DQueue defines a queue. Must init by New()
-type DQueue struct {
+// queue defines a queue.
+type queue struct {
+	// basic
 	name string
-	rdb  *redis.Client
+	rdb  *rdb
 
+	// daemon
 	daemonWorkerNum      int
 	daemonWorkerInterval time.Duration
 
+	// consumer
 	consumeWorkerNum int
+	maxRetryTimes    int
+
+	mws          []middlewareFunc
+	enableCancel bool
 }
 
-func New(opts *Options) *DQueue {
-	var dq DQueue
-	dq.init(opts)
-	return &dq
+func New(opts *Options) *queue {
+	var q queue
+	q.opts(opts)
+	go q.daemon()
+	return &q
 }
 
-func (d *DQueue) Close() {
+func (q *queue) Close() {
+	// TODO
 }
 
-func (d *DQueue) Destroy() {
+func (q *queue) Destroy() {
+	// TODO
 }
 
-func (d *DQueue) init(opts *Options) {
-	d.name = opts.Name
-	d.rdb = redis.NewClient(opts.RedisOpt)
+func (q *queue) opts(opts *Options) {
+	q.name = opts.Name
+	q.rdb = &rdb{redis.NewClient(opts.RedisOpt)}
 
-	d.daemonWorkerNum = 1
+	q.daemonWorkerNum = 1
 	if opts.DaemonWorkerNum > 1 {
-		d.daemonWorkerNum = opts.DaemonWorkerNum
+		q.daemonWorkerNum = opts.DaemonWorkerNum
 	}
 
-	d.daemonWorkerInterval = 100 * time.Millisecond
-	if opts.DaemonWorkerInterval > 0 {
-		d.daemonWorkerInterval = opts.DaemonWorkerInterval
+	q.daemonWorkerInterval = 100 * time.Millisecond
+	if opts.DaemonWorkerInterval >= 0 {
+		q.daemonWorkerInterval = opts.DaemonWorkerInterval
 	}
 
-	d.consumeWorkerNum = 1
+	q.consumeWorkerNum = 1
 	if opts.ConsumeWorkerNum > 0 {
-		d.consumeWorkerNum = opts.ConsumeWorkerNum
+		q.consumeWorkerNum = opts.ConsumeWorkerNum
 	}
 
-	go d.daemon()
+	q.enableCancel = opts.EnableCancel
+}
+
+const (
+	readyPrefix  = "dq:ready:"
+	delayPrefix  = "dq:delay:"
+	cancelPrefix = "dq:cancel:"
+)
+
+type rdb struct {
+	c *redis.Client
+}
+
+type HandlerFunc func(context.Context, *Message) error
+
+func (h HandlerFunc) Process(ctx context.Context, message *Message) error {
+	return h(ctx, message)
+}
+
+type Handler interface {
+	Process(context.Context, *Message) error
+}
+
+type middlewareFunc func(Handler) Handler
+
+func (q *queue) Use(mws ...middlewareFunc) {
+	for _, f := range mws {
+		q.mws = append(q.mws, f)
+	}
 }
 
 // Produce a message that will receive at time at. a nil time represent real-time message
-func (d *DQueue) Produce(ctx context.Context, m *ProducerMessage) (id string, err error) {
-	bs, err := json.Marshal(m.Value)
-	if err != nil {
-		return "", fmt.Errorf("json marshal failed, err: %s", err)
-	}
-	var v interface{}
-	if err = json.Unmarshal(bs, &v); err != nil {
-		return "", fmt.Errorf("json unmarshal failed, err: %s", err)
+func (q *queue) Produce(ctx context.Context, m *ProducerMessage) (id string, err error) {
+	payload := m.Payload
+	if m.Value != nil {
+		if payload, err = json.Marshal(m.Value); err != nil {
+			return "", fmt.Errorf("json marshal failed, err: %s", err)
+		}
 	}
 
-	mv, err := structpb.NewValue(v)
-	if err != nil {
-		return "", fmt.Errorf("pb new value failed, err: %s", err)
-	}
 	message := &Message{
-		Payload:     mv,
+		Payload:     payload,
 		Id:          uuid.NewString(),
 		Retried:     0,
 		ProduceTime: timestamppb.Now(),
 		DeliverAt: func() *timestamppb.Timestamp {
-			if m.DeliverAt.IsZero() {
+			if m.DeliverAt == nil || m.DeliverAt.IsZero() {
 				return nil
 			}
-			return timestamppb.New(m.DeliverAt)
+			return timestamppb.New(*m.DeliverAt)
 		}(),
 	}
-	return d.produce(ctx, message)
+
+	return q.produce(ctx, message)
 }
 
-func (d *DQueue) produce(ctx context.Context, m *Message) (msgID string, err error) {
+func (q *queue) produce(ctx context.Context, m *Message) (msgID string, err error) {
 	bs, _ := proto.Marshal(m)
 	ms := base64.StdEncoding.EncodeToString(bs)
-	err = d.enqueue(ctx, ms, m.DeliverAt.AsTime())
+
+	err = q.enqueue(ctx, ms, m.DeliverAt.AsTime())
 	if err != nil {
 		return "", fmt.Errorf("enqueue failed, err: %s", err)
 	}
 	return m.Id, nil
 }
 
-type handler func(message *Message)
-
 // Consume use handler to process message
-func (d *DQueue) Consume(ctx context.Context, h handler) {
-	go d.consume(ctx, h)
+func (q *queue) Consume(ctx context.Context, h Handler) {
+	go q.consume(ctx, h)
 }
 
-func (d *DQueue) consume(ctx context.Context, h handler) {
-	for i := 0; i < d.consumeWorkerNum; i++ {
+func (q *queue) consume(ctx context.Context, h Handler) {
+	if q.enableCancel {
+		q.mws = append([]middlewareFunc{newCancelMiddleware(q.rdb)}, q.mws...)
+	}
+
+	for i := len(q.mws) - 1; i >= 0; i-- {
+		h = q.mws[i](h)
+	}
+
+	for i := 0; i < q.consumeWorkerNum; i++ {
 		go func() {
 			for {
-				msg := d.takeMessageBlock(ctx)
+				msg := q.takeMessage(ctx)
 				if msg != nil {
-					h(msg)
+					_ = h.Process(ctx, msg)
 				}
 			}
 		}()
 	}
 }
 
-func (d *DQueue) takeMessageBlock(ctx context.Context) *Message {
-	msg, err := d.dequeueBlock(ctx)
+func (m *Message) GetSchemaValue(v interface{}) error {
+	return json.Unmarshal(m.Payload, v)
+}
+
+func (q *queue) takeMessage(ctx context.Context) *Message {
+	msg, err := q.dequeueBlock(ctx)
 	if err != nil || len(msg) < 2 {
 		return nil
 	}
@@ -140,31 +178,31 @@ func (d *DQueue) takeMessageBlock(ctx context.Context) *Message {
 	return &m
 }
 
-func (d *DQueue) RedeliveryAfter(ctx context.Context, msg *Message, dur time.Duration) error {
-	return d.RedeliveryAt(ctx, msg, time.Now().Add(dur))
+func (q *queue) RedeliveryAfter(ctx context.Context, msg *Message, dur time.Duration) error {
+	return q.RedeliveryAt(ctx, msg, time.Now().Add(dur))
 }
 
-func (d *DQueue) RedeliveryAt(ctx context.Context, m *Message, at time.Time) error {
+func (q *queue) RedeliveryAt(ctx context.Context, m *Message, at time.Time) error {
 	m.Retried += 1
 	m.ProduceTime = timestamppb.Now()
 	m.DeliverAt = timestamppb.New(at)
 
-	_, err := d.produce(ctx, m)
+	_, err := q.produce(ctx, m)
 	if err != nil {
 		return fmt.Errorf("produce failed, err: %s", err)
 	}
 	return nil
 }
 
-func (d *DQueue) enqueue(ctx context.Context, msg string, at time.Time) error {
+func (q *queue) enqueue(ctx context.Context, msg string, at time.Time) error {
 	if at.Before(time.Now()) {
-		return d.rdb.RPush(ctx, readyQueuePrefix+d.name, msg).Err()
+		return q.rdb.c.RPush(ctx, readyPrefix+q.name, msg).Err()
 	}
-	return d.rdb.ZAdd(ctx, delayQueuePrefix+d.name, &redis.Z{Score: float64(at.UnixMilli()), Member: msg}).Err()
+	return q.rdb.c.ZAdd(ctx, delayPrefix+q.name, &redis.Z{Score: float64(at.UnixMilli()), Member: msg}).Err()
 }
 
-func (d *DQueue) dequeueBlock(ctx context.Context) ([]string, error) {
-	res, err := d.rdb.BLPop(ctx, 10*time.Second, readyQueuePrefix+d.name).Result()
+func (q *queue) dequeueBlock(ctx context.Context) ([]string, error) {
+	res, err := q.rdb.c.BLPop(ctx, 10*time.Second, readyPrefix+q.name).Result()
 	if err == redis.Nil {
 		return []string{}, nil
 	}
@@ -173,4 +211,11 @@ func (d *DQueue) dequeueBlock(ctx context.Context) ([]string, error) {
 	}
 
 	return res, nil
+}
+
+func (q *queue) Cancel(ctx context.Context, id string) error {
+	if !q.enableCancel {
+		return fmt.Errorf("cancel not enabled")
+	}
+	return q.rdb.c.SetEX(ctx, cancelPrefix+id, 1, 1*time.Hour).Err()
 }
