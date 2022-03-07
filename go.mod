@@ -1,4 +1,4 @@
-module github.com/9ft/dqueue
+module github.com/mzcabc/dqueue
 
 go 1.17
 

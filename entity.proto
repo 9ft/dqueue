@@ -3,7 +3,7 @@ package entity;
 
 import "google/protobuf/timestamp.proto";
 
-option go_package = "github.com/9ft/dqueue";
+option go_package = "github.com/mzcabc/dqueue";
 
 message Message {
   bytes payload = 1;

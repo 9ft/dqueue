@@ -7,7 +7,7 @@ import (
 	"github.com/go-redis/redis/v8"
 )
 
-func (q *queue) daemon() {
+func (q *Queue) daemon() {
 	for i := 0; i < q.daemonWorkerNum; i++ {
 		go func() {
 			if q.daemonWorkerInterval == 0 {

@@ -15,8 +15,8 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
-// queue defines a queue.
-type queue struct {
+// Queue defines a queue.
+type Queue struct {
 	// basic
 	name string
 	rdb  *rdb
@@ -33,22 +33,22 @@ type queue struct {
 	enableCancel bool
 }
 
-func New(opts *Options) *queue {
-	var q queue
+func New(opts *Options) *Queue {
+	var q Queue
 	q.opts(opts)
 	go q.daemon()
 	return &q
 }
 
-func (q *queue) Close() {
+func (q *Queue) Close() {
 	// TODO
 }
 
-func (q *queue) Destroy() {
+func (q *Queue) Destroy() {
 	// TODO
 }
 
-func (q *queue) opts(opts *Options) {
+func (q *Queue) opts(opts *Options) {
 	q.name = opts.Name
 	q.rdb = &rdb{redis.NewClient(opts.RedisOpt)}
 
@@ -92,14 +92,14 @@ type Handler interface {
 
 type middlewareFunc func(Handler) Handler
 
-func (q *queue) Use(mws ...middlewareFunc) {
+func (q *Queue) Use(mws ...middlewareFunc) {
 	for _, f := range mws {
 		q.mws = append(q.mws, f)
 	}
 }
 
 // Produce a message that will receive at time at. a nil time represent real-time message
-func (q *queue) Produce(ctx context.Context, m *ProducerMessage) (id string, err error) {
+func (q *Queue) Produce(ctx context.Context, m *ProducerMessage) (id string, err error) {
 	payload := m.Payload
 	if m.Value != nil {
 		if payload, err = json.Marshal(m.Value); err != nil {
@@ -123,7 +123,7 @@ func (q *queue) Produce(ctx context.Context, m *ProducerMessage) (id string, err
 	return q.produce(ctx, message)
 }
 
-func (q *queue) produce(ctx context.Context, m *Message) (msgID string, err error) {
+func (q *Queue) produce(ctx context.Context, m *Message) (msgID string, err error) {
 	bs, _ := proto.Marshal(m)
 	ms := base64.StdEncoding.EncodeToString(bs)
 
@@ -135,11 +135,11 @@ func (q *queue) produce(ctx context.Context, m *Message) (msgID string, err erro
 }
 
 // Consume use handler to process message
-func (q *queue) Consume(ctx context.Context, h Handler) {
+func (q *Queue) Consume(ctx context.Context, h Handler) {
 	go q.consume(ctx, h)
 }
 
-func (q *queue) consume(ctx context.Context, h Handler) {
+func (q *Queue) consume(ctx context.Context, h Handler) {
 	if q.enableCancel {
 		q.mws = append([]middlewareFunc{newCancelMiddleware(q.rdb)}, q.mws...)
 	}
@@ -164,7 +164,7 @@ func (m *Message) GetSchemaValue(v interface{}) error {
 	return json.Unmarshal(m.Payload, v)
 }
 
-func (q *queue) takeMessage(ctx context.Context) *Message {
+func (q *Queue) takeMessage(ctx context.Context) *Message {
 	msg, err := q.dequeueBlock(ctx)
 	if err != nil || len(msg) < 2 {
 		return nil
@@ -178,11 +178,11 @@ func (q *queue) takeMessage(ctx context.Context) *Message {
 	return &m
 }
 
-func (q *queue) RedeliveryAfter(ctx context.Context, msg *Message, dur time.Duration) error {
+func (q *Queue) RedeliveryAfter(ctx context.Context, msg *Message, dur time.Duration) error {
 	return q.RedeliveryAt(ctx, msg, time.Now().Add(dur))
 }
 
-func (q *queue) RedeliveryAt(ctx context.Context, m *Message, at time.Time) error {
+func (q *Queue) RedeliveryAt(ctx context.Context, m *Message, at time.Time) error {
 	m.Retried += 1
 	m.ProduceTime = timestamppb.Now()
 	m.DeliverAt = timestamppb.New(at)
@@ -194,14 +194,14 @@ func (q *queue) RedeliveryAt(ctx context.Context, m *Message, at time.Time) erro
 	return nil
 }
 
-func (q *queue) enqueue(ctx context.Context, msg string, at time.Time) error {
+func (q *Queue) enqueue(ctx context.Context, msg string, at time.Time) error {
 	if at.Before(time.Now()) {
 		return q.rdb.c.RPush(ctx, readyPrefix+q.name, msg).Err()
 	}
 	return q.rdb.c.ZAdd(ctx, delayPrefix+q.name, &redis.Z{Score: float64(at.UnixMilli()), Member: msg}).Err()
 }
 
-func (q *queue) dequeueBlock(ctx context.Context) ([]string, error) {
+func (q *Queue) dequeueBlock(ctx context.Context) ([]string, error) {
 	res, err := q.rdb.c.BLPop(ctx, 10*time.Second, readyPrefix+q.name).Result()
 	if err == redis.Nil {
 		return []string{}, nil
@@ -213,7 +213,7 @@ func (q *queue) dequeueBlock(ctx context.Context) ([]string, error) {
 	return res, nil
 }
 
-func (q *queue) Cancel(ctx context.Context, id string) error {
+func (q *Queue) Cancel(ctx context.Context, id string) error {
 	if !q.enableCancel {
 		return fmt.Errorf("cancel not enabled")
 	}

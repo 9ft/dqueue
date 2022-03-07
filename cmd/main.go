@@ -7,7 +7,7 @@ import (
 
 	"github.com/go-redis/redis/v8"
 
-	"github.com/9ft/dqueue"
+	"github.com/mzcabc/dqueue"
 )
 
 func main() {
