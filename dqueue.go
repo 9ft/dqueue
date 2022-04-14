@@ -10,8 +10,8 @@ import (
 	"time"
 
 	"github.com/go-redis/redis/v8"
-	"github.com/golang/protobuf/proto"
 	"github.com/google/uuid"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -29,8 +29,9 @@ type Queue struct {
 	consumeWorkerNum int
 	maxRetryTimes    int
 
-	mws          []middlewareFunc
-	enableCancel bool
+	mws              []middlewareFunc
+	enableCancel     bool
+	cancelMarkExpire time.Duration
 }
 
 func New(opts *Options) *Queue {
@@ -52,6 +53,14 @@ func (q *Queue) opts(opts *Options) {
 	q.name = opts.Name
 	q.rdb = &rdb{redis.NewClient(opts.RedisOpt)}
 
+	if opts.RedisHook != nil {
+		q.rdb.c.AddHook(opts.RedisHook)
+	}
+
+	if opts.RedisLogger != nil {
+		redis.SetLogger(opts.RedisLogger)
+	}
+
 	q.daemonWorkerNum = 1
 	if opts.DaemonWorkerNum > 1 {
 		q.daemonWorkerNum = opts.DaemonWorkerNum
@@ -68,6 +77,10 @@ func (q *Queue) opts(opts *Options) {
 	}
 
 	q.enableCancel = opts.EnableCancel
+	q.cancelMarkExpire = 1 * time.Hour
+	if opts.CancelMarkExpire != 0 {
+		q.cancelMarkExpire = opts.CancelMarkExpire
+	}
 }
 
 const (
@@ -217,5 +230,5 @@ func (q *Queue) Cancel(ctx context.Context, id string) error {
 	if !q.enableCancel {
 		return fmt.Errorf("cancel not enabled")
 	}
-	return q.rdb.c.SetEX(ctx, cancelPrefix+id, 1, 1*time.Hour).Err()
+	return q.rdb.c.SetEX(ctx, cancelPrefix+id, 1, q.cancelMarkExpire).Err()
 }
