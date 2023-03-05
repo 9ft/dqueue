@@ -43,3 +43,11 @@ func (q *Queue) enqueue(ctx context.Context, id, msg string, createAt time.Time,
 	}
 	return q.zAddSetEx(ctx, q.getKey(kDelay), q.getKey(kMsg), id, msg, createAt, deliverAt, int(q.messageSaveTime.Seconds()))
 }
+
+func (q *Queue) Cancel(ctx context.Context, id string) error {
+	_, err := q.rdb.commit(ctx, q.getKey(kDelay), q.getKey(kRetry), q.getKey(kMsg), id)
+	if err != nil {
+		return fmt.Errorf("commit message failed, err: %v", err)
+	}
+	return nil
+}
