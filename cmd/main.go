@@ -2,37 +2,42 @@ package main
 
 import (
 	"context"
-	"log"
+	"encoding/json"
+	"fmt"
+	"strconv"
 	"time"
 
-	"github.com/go-redis/redis/v8"
-
-	"github.com/mzcabc/dqueue"
+	"github.com/mzcabc/dq"
 )
 
 func main() {
 	ctx := context.Background()
 
-	dq := dqueue.New(&dqueue.Options{
-		Name:                 "test",
-		RedisOpt:             &redis.Options{Addr: "127.0.0.1:6379"},
-		DaemonWorkerInterval: 1 * time.Second,
-		EnableCancel:         true,
-	})
+	q := dq.New()
 
-	dq.Consume(ctx, dqueue.HandlerFunc(func(ctx context.Context, m *dqueue.Message) error {
-		var i int
-		_ = m.GetSchemaValue(&i)
-		log.Println("consume:", i)
+	q.Consume(context.Background(), dq.HandlerFunc(func(ctx context.Context, m *dq.ConsumerMessage) error {
+		bs, _ := json.Marshal(m)
+		fmt.Println(time.Now(), "consume message:", string(bs))
 		return nil
 	}))
 
+	// produce realtime message
 	for i := 0; i < 10; i++ {
-		id, _ := dq.Produce(ctx, &dqueue.ProducerMessage{
-			Value: i,
+		id, err := q.Produce(ctx, &dq.ProducerMessage{
+			Payload: []byte("realtime message, i =" + strconv.Itoa(i)),
 		})
-		log.Println("produce:", id)
+		fmt.Println(time.Now(), "produce realtime message:", id, "err:", err)
 	}
 
-	select {}
+	// produce delay message
+	for i := 0; i < 10; i++ {
+		at := time.Now().Add(3 * time.Second)
+		id, err := q.Produce(ctx, &dq.ProducerMessage{
+			Payload: []byte("delay message, i =" + strconv.Itoa(i)),
+			At:      &at,
+		})
+		fmt.Println(time.Now(), "produce delay message:", id, "err:", err)
+	}
+
+	<-time.After(10 * time.Second)
 }
