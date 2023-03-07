@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -50,16 +51,30 @@ func (q *Queue) consume(ctx context.Context, h Handler) {
 				}
 			}()
 
+			ticker := time.NewTicker(q.consumeWorkerInterval)
+			defer ticker.Stop()
+
+			lastOk := make(chan struct{}, 1)
 			for {
 				select {
 				case <-q.shutdown:
 					wg.Done()
 					return
-				default:
-					if err := q.process(ctx, h); err != nil {
-						q.log(ctx, Warn, "process message failed, err: %v", err)
+				case <-lastOk:
+				case <-ticker.C:
+					for ; len(lastOk) > 0; <-lastOk {
 					}
 				}
+
+				err := q.process(ctx, h)
+				if err == takeNil {
+					continue
+				}
+				if err != nil {
+					q.log(ctx, Warn, "process message failed, err: %v", err)
+					continue
+				}
+				lastOk <- struct{}{}
 			}
 		}(i)
 	}
@@ -68,6 +83,8 @@ func (q *Queue) consume(ctx context.Context, h Handler) {
 	q.log(ctx, Trace, "all consume worker exited, num: %d", q.consumeWorkerNum)
 	q.done <- struct{}{}
 }
+
+var takeNil = errors.New("take nil")
 
 func (q *Queue) process(ctx context.Context, h Handler) error {
 	rq := q.getKey(kReady) // list
@@ -80,7 +97,7 @@ func (q *Queue) process(ctx context.Context, h Handler) error {
 	}
 
 	if text == "" {
-		return nil
+		return takeNil
 	}
 
 	cm, err := parse(text)

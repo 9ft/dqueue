@@ -17,6 +17,7 @@ type opts struct {
 	// consumer
 	consumeWorkerNum      int
 	consumeWorkerInterval time.Duration
+	consumeTimeout        time.Duration
 	retryEnable           bool
 	retryTimes            int
 	retryInterval         time.Duration
@@ -41,6 +42,7 @@ func defaultOpts() opts {
 
 		consumeWorkerNum:      1,
 		consumeWorkerInterval: 100 * time.Millisecond,
+		consumeTimeout:        3 * time.Second,
 		retryEnable:           true,
 		retryTimes:            3,
 		retryInterval:         3 * time.Second,
@@ -75,6 +77,12 @@ func WithDaemonWorkerInterval(interval time.Duration) func(*Queue) {
 func WithConsumerWorkerNum(num int) func(*Queue) {
 	return func(q *Queue) {
 		q.consumeWorkerNum = num
+	}
+}
+
+func WithConsumerTimeout(timeout time.Duration) func(*Queue) {
+	return func(q *Queue) {
+		q.consumeTimeout = timeout
 	}
 }
 
