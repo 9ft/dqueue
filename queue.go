@@ -13,6 +13,11 @@ type Queue struct {
 
 	shutdown chan struct{}
 	done     chan struct{}
+
+	consumeDone chan struct{}
+	retryDone   chan struct{}
+	processDone chan struct{}
+	ackDone     chan struct{}
 }
 
 type rdb struct {
@@ -31,6 +36,10 @@ func New(options ...func(*Queue)) *Queue {
 	}
 
 	q.shutdown = make(chan struct{})
+	q.consumeDone = make(chan struct{})
+	q.retryDone = make(chan struct{})
+	q.processDone = make(chan struct{})
+	q.ackDone = make(chan struct{})
 	q.done = make(chan struct{})
 
 	if q.rdb.Client == nil {
@@ -39,12 +48,23 @@ func New(options ...func(*Queue)) *Queue {
 		})
 	}
 
+	ctx := context.Background()
+	if _, err := q.rdb.XGroupCreateMkStream(ctx, q.getKey(kReady), "dq", "0").Result(); err != nil {
+		q.log(ctx, Error, "group create failed, queue: %s, err: %s", q.name, err)
+	}
+
 	go q.daemon()
 	return &q
 }
 
 func (q *Queue) Close(ctx context.Context) error {
 	close(q.shutdown)
+
+	// wait for all workers exit
+	// 1. stop consume
+	// 2. stop retry
+	// 3. stop process
+	// 4. stop ack
 
 	select {
 	case <-q.done:

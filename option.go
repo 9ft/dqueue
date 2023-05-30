@@ -15,18 +15,20 @@ type opts struct {
 	daemonWorkerInterval time.Duration
 
 	// consumer
-	consumeWorkerNum      int
-	consumeWorkerInterval time.Duration
-	consumeTimeout        time.Duration
-	retryEnable           bool
-	retryTimes            int
-	retryInterval         time.Duration
+	consumeWorkerNum        int
+	consumeWorkerInterval   time.Duration
+	consumeTimeout          time.Duration
+	consumeTakeBlockTimeout time.Duration
+	retryEnable             bool
+	retryTimes              int
+	retryInterval           time.Duration
 
 	// middleware
 	mws []middlewareFunc
 
 	// message
 	messageSaveTime time.Duration
+	streamMaxLen    int64
 
 	// logger
 	logMode LogLevel
@@ -40,16 +42,18 @@ func defaultOpts() opts {
 		daemonWorkerNum:      1,
 		daemonWorkerInterval: 100 * time.Millisecond,
 
-		consumeWorkerNum:      1,
-		consumeWorkerInterval: 100 * time.Millisecond,
-		consumeTimeout:        3 * time.Second,
-		retryEnable:           true,
-		retryTimes:            3,
-		retryInterval:         3 * time.Second,
+		consumeWorkerNum:        1,
+		consumeWorkerInterval:   100 * time.Millisecond,
+		consumeTimeout:          3 * time.Second,
+		consumeTakeBlockTimeout: 10 * time.Second,
+		retryEnable:             true,
+		retryTimes:              3,
+		retryInterval:           3 * time.Second,
 
 		mws: nil,
 
 		messageSaveTime: 1 * time.Hour,
+		streamMaxLen:    10000,
 
 		logMode: Slient,
 		logger:  defaultLogger{},
@@ -86,6 +90,12 @@ func WithConsumerTimeout(timeout time.Duration) func(*Queue) {
 	}
 }
 
+func WithConsumerTakeBlockTimeout(timeout time.Duration) func(*Queue) {
+	return func(q *Queue) {
+		q.consumeTakeBlockTimeout = timeout
+	}
+}
+
 func WithConsumerWorkerInterval(interval time.Duration) func(*Queue) {
 	return func(q *Queue) {
 		q.consumeWorkerInterval = interval
@@ -119,6 +129,12 @@ func WithMiddleware(mws ...middlewareFunc) func(*Queue) {
 func WithMessageSaveTime(saveTime time.Duration) func(*Queue) {
 	return func(q *Queue) {
 		q.messageSaveTime = saveTime
+	}
+}
+
+func WithStreamMaxLen(maxLen int64) func(*Queue) {
+	return func(q *Queue) {
+		q.streamMaxLen = maxLen
 	}
 }
 

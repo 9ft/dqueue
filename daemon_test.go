@@ -2,8 +2,6 @@ package dq
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
 	"strconv"
 	"sync"
 	"testing"
@@ -15,27 +13,28 @@ import (
 func TestDaemon(t *testing.T) {
 	t.SkipNow()
 
-	q := New()
-
-	q.daemon()
+	New(WithDaemonWorkerNum(1), WithDaemonWorkerInterval(3*time.Second), WithLogMode(Trace))
 
 	<-time.Tick(10 * time.Second)
 }
 
 func TestDaemonDelayToReady(t *testing.T) {
+	ctx := context.Background()
 	// init
 	q := New()
 
 	// produce
 	num := 10
-	at := time.Now().Add(10 * time.Millisecond)
+	var msgIDs []string
+	at := time.Now().Add(100 * time.Millisecond)
 	for i := 0; i < num; i++ {
-		id, err := q.Produce(context.Background(), &ProducerMessage{
+		id, err := q.Produce(ctx, &ProducerMessage{
 			Payload: []byte("delay_" + strconv.Itoa(i)),
 			At:      &at,
 		})
 		assert.Nil(t, err)
-		t.Log("produce:", id)
+		t.Logf("message produced: %s", id)
+		msgIDs = append(msgIDs, id)
 	}
 
 	// consume
@@ -48,11 +47,8 @@ func TestDaemonDelayToReady(t *testing.T) {
 		close(done)
 	}()
 
-	q.Consume(context.Background(), HandlerFunc(func(ctx context.Context, m *ConsumerMessage) error {
-		bs, _ := json.Marshal(m)
-		t.Log("consume:", string(bs))
-		t.Log("consume:", string(m.Payload))
-
+	q.Consume(ctx, HandlerFunc(func(ctx context.Context, m *ConsumerMessage) error {
+		t.Logf("consume: %#v, %s, %s\n", m, m.ID, string(m.Payload))
 		wg.Done()
 		return nil
 	}))
@@ -62,48 +58,26 @@ func TestDaemonDelayToReady(t *testing.T) {
 		t.Fatal("consume timeout")
 	case <-done:
 	}
-}
 
-func TestDaemonRetryToReady(t *testing.T) {
-	// init
-	q := New(WithRetryInterval(100 * time.Millisecond))
+	// assert
+	keys, err := q.rdb.Keys(ctx, q.getKey(kMsg)+":*").Result()
+	assert.Nil(t, err)
+	assert.Equal(t, num, len(keys))
 
-	// produce
-	num := 10
-	for i := 0; i < num; i++ {
-		id, err := q.Produce(context.Background(), &ProducerMessage{
-			Payload: []byte("ready_" + strconv.Itoa(i)),
-		})
-		assert.Nil(t, err)
-		t.Log("produce:", id)
+	// clean
+	delCnt, err := q.rdb.Del(ctx, keys...).Result()
+	assert.Nil(t, err)
+	assert.EqualValues(t, num, delCnt)
+
+	messages, err := q.rdb.XRangeN(ctx, q.getKey(kReady), "-", "+", int64(num)).Result()
+	assert.Nil(t, err)
+	assert.EqualValues(t, num, len(messages))
+	var ids []string
+	for _, m := range messages {
+		ids = append(ids, m.ID)
 	}
 
-	// consume
-	var wg sync.WaitGroup
-	wg.Add(num * 2)
-
-	done := make(chan struct{})
-	go func() {
-		wg.Wait()
-		close(done)
-	}()
-
-	q.Consume(context.Background(), HandlerFunc(func(ctx context.Context, m *ConsumerMessage) error {
-		bs, _ := json.Marshal(m)
-		t.Log("consume:", string(bs))
-		t.Log("consume:", string(m.Payload))
-
-		if m.Retried == 0 {
-			return fmt.Errorf("retry mock")
-		}
-
-		wg.Done()
-		return nil
-	}))
-
-	select {
-	case <-time.After(500 * time.Millisecond):
-		t.Fatal("consume timeout")
-	case <-done:
-	}
+	delCnt, err = q.rdb.XDel(ctx, q.getKey(kReady), ids...).Result()
+	assert.Nil(t, err)
+	assert.EqualValues(t, num, delCnt)
 }

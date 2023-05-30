@@ -13,9 +13,9 @@ import (
 func main() {
 	ctx := context.Background()
 
-	q := dq.New()
+	q := dq.New(dq.WithLogMode(dq.Trace))
 
-	q.Consume(context.Background(), dq.HandlerFunc(func(ctx context.Context, m *dq.ConsumerMessage) error {
+	q.Consume(ctx, dq.HandlerFunc(func(ctx context.Context, m *dq.ConsumerMessage) error {
 		bs, _ := json.Marshal(m)
 		fmt.Println(time.Now(), "consume message:", string(bs))
 		return nil
@@ -40,4 +40,6 @@ func main() {
 	}
 
 	<-time.After(10 * time.Second)
+
+	_ = q.Close(ctx)
 }
