@@ -13,7 +13,8 @@ func TestProduceReady(t *testing.T) {
 	ctx := context.Background()
 
 	// init
-	q := New()
+	q := New(options...)
+	defer t.Cleanup(func() { cleanup(t, q) })
 
 	// produce
 	num := 100
@@ -22,7 +23,7 @@ func TestProduceReady(t *testing.T) {
 		id, err := q.Produce(context.Background(), &ProducerMessage{
 			Payload: []byte("ready_" + strconv.Itoa(i)),
 		})
-		t.Logf("message produced: %s", id)
+		// t.Logf("message produced: %s", id)
 		assert.Nil(t, err)
 		msgIDs = append(msgIDs, id)
 	}
@@ -33,16 +34,14 @@ func TestProduceReady(t *testing.T) {
 	cnt, err := q.rdb.XLen(ctx, q.getKey(kReady)).Result()
 	assert.Nil(t, err)
 	assert.EqualValues(t, num, cnt)
-
-	// clean
-	delCnt, err := q.rdb.XDel(ctx, q.getKey(kReady), msgIDs...).Result()
-	assert.Nil(t, err)
-	assert.EqualValues(t, num, delCnt)
 }
 
 func TestProduceDelay(t *testing.T) {
 	ctx := context.Background()
-	q := New()
+
+	// init
+	q := New(options...)
+	defer t.Cleanup(func() { cleanup(t, q) })
 
 	num := 10
 	var msgIDs []string
@@ -67,13 +66,4 @@ func TestProduceDelay(t *testing.T) {
 	keys, err := q.rdb.Keys(ctx, q.getKey(kMsg)+":*").Result()
 	assert.Nil(t, err)
 	assert.Equal(t, num, len(keys))
-
-	// clean
-	delCnt, err := q.rdb.Del(ctx, q.getKey(kDelay)).Result()
-	assert.Nil(t, err)
-	assert.EqualValues(t, 1, delCnt)
-
-	delCnt, err = q.rdb.Del(ctx, keys...).Result()
-	assert.Nil(t, err)
-	assert.EqualValues(t, num, delCnt)
 }

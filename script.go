@@ -59,17 +59,27 @@ func (r *rdb) takeMessageStream(ctx context.Context, list, retry, data string, b
 }
 
 func (r *rdb) takeMessageStreamRetry(ctx context.Context, list, retry, data string, retryEnable bool, retryInterval time.Duration, maxRetry int, expSec int, ackChan chan<- string) (id string, retryCount int, retdata map[string]interface{}, err error) {
-	// take from retry
-	pendings, err := r.XPendingExt(ctx, &redis.XPendingExtArgs{
+	// TODO rename retried to delivered_times
+	messages, _, err := r.XAutoClaim(ctx, &redis.XAutoClaimArgs{
 		Stream:   list,
 		Group:    "dq",
-		Idle:     retryInterval,
+		MinIdle:  retryInterval,
 		Start:    "-",
-		End:      "+",
 		Count:    1,
 		Consumer: "dq",
 	}).Result()
-	// TODO handle err
+	if len(messages) == 0 {
+		return "", 0, nil, takeNil
+	}
+
+	pendings, err := r.XPendingExt(ctx, &redis.XPendingExtArgs{
+		Stream:   list,
+		Group:    "dq",
+		Start:    messages[0].ID,
+		End:      messages[0].ID,
+		Count:    1,
+		Consumer: "dq",
+	}).Result()
 	if len(pendings) == 0 {
 		return "", 0, nil, takeNil
 	}
@@ -81,18 +91,7 @@ func (r *rdb) takeMessageStreamRetry(ctx context.Context, list, retry, data stri
 		return "", 0, nil, takeNil
 	}
 
-	messages, err := r.XClaim(ctx, &redis.XClaimArgs{
-		Stream:   list,
-		Group:    "dq",
-		Consumer: "dq",
-		MinIdle:  3 * time.Second,
-		Messages: []string{pendings[0].ID},
-	}).Result()
-	// TODO handle err
-	if len(messages) == 0 {
-		return "", 0, nil, takeNil
-	}
-	return messages[0].ID, int(pendings[0].RetryCount), messages[0].Values, nil
+	return messages[0].ID, int(pendings[0].RetryCount) - 1, messages[0].Values, nil
 }
 
 // ready list will be removed by the consumer,

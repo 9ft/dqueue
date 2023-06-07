@@ -33,7 +33,14 @@ func (h HandlerFunc) Process(ctx context.Context, message *ConsumerMessage) erro
 type middlewareFunc func(Handler) Handler
 
 // Consume use Handler to process message
-func (q *Queue) Consume(ctx context.Context, h Handler) {
+func (q *Queue) Consume(ctx context.Context, h HandlerFunc) {
+	q.shutdown = make(chan struct{})
+	q.consumeDone = make(chan struct{})
+	q.retryDone = make(chan struct{})
+	q.processDone = make(chan struct{})
+	q.ackDone = make(chan struct{})
+	q.done = make(chan struct{})
+
 	msgCh := make(chan *ConsumerMessage, q.consumeWorkerNum)
 	ackCh := make(chan string, q.consumeWorkerNum)
 
@@ -55,7 +62,7 @@ func (q *Queue) ack(ctx context.Context, ackCh chan string) {
 			if len(ids) != 0 {
 				cnt, err := q.rdb.XAck(ctx, q.getKey(kReady), "dq", ids...).Result()
 				if err != nil || cnt != int64(len(ids)) {
-					q.log(ctx, Warn, "commit message failed, succ: %d, err: %v", cnt, err)
+					q.log(ctx, Warn, "commit message failed, want: %d, cnt: %d, err: %v", len(ids), cnt, err)
 				}
 			}
 
@@ -66,7 +73,7 @@ func (q *Queue) ack(ctx context.Context, ackCh chan string) {
 		case id := <-ackCh:
 			cnt, err := q.rdb.XAck(ctx, q.getKey(kReady), "dq", id).Result()
 			if err != nil || cnt == 0 {
-				q.log(ctx, Warn, "commit message failed, err: %v", err)
+				q.log(ctx, Warn, "commit message failed, id: %s, cnt: %d, err: %v", id, cnt, err)
 				ackCh <- id
 				continue
 			}
@@ -255,7 +262,7 @@ func (q *Queue) process(ctx context.Context, msgCh <-chan *ConsumerMessage, ackC
 						m.ID = m.uuid
 					}
 					if err := h.Process(handlerCtx, m); err != nil {
-						q.log(ctx, Warn, "process message failed, err: %v", err)
+						q.log(ctx, Warn, "process message failed, id: %s, err: %v", m.ID, err)
 						continue
 					}
 					q.log(ctx, Trace, "process message success, id: %s", m.ID)

@@ -24,10 +24,10 @@ func BenchmarkProduceReady(b *testing.B) {
 	}
 	b.StopTimer()
 
-	q.Consume(context.Background(), HandlerFunc(func(ctx context.Context, m *ConsumerMessage) error {
+	q.Consume(context.Background(), func(ctx context.Context, m *ConsumerMessage) error {
 		wg.Done()
 		return nil
-	}))
+	})
 
 	wg.Wait()
 }
@@ -51,10 +51,10 @@ func BenchmarkProduceDelay(b *testing.B) {
 	}
 	b.StopTimer()
 
-	q.Consume(context.Background(), HandlerFunc(func(ctx context.Context, m *ConsumerMessage) error {
+	q.Consume(context.Background(), func(ctx context.Context, m *ConsumerMessage) error {
 		wg.Done()
 		return nil
-	}))
+	})
 
 	wg.Wait()
 }
@@ -75,19 +75,19 @@ func BenchmarkConsume(b *testing.B) {
 	}
 
 	b.ResetTimer()
-	q.Consume(context.Background(), HandlerFunc(func(ctx context.Context, m *ConsumerMessage) error {
+	q.Consume(context.Background(), func(ctx context.Context, m *ConsumerMessage) error {
 		wg.Done()
 		return nil
-	}))
+	})
 	wg.Wait()
 	b.StopTimer()
 
 	_ = q.Close(context.Background())
 
-	q.Consume(context.Background(), HandlerFunc(func(ctx context.Context, m *ConsumerMessage) error {
+	q.Consume(context.Background(), func(ctx context.Context, m *ConsumerMessage) error {
 		b.FailNow()
 		return nil
-	}))
+	})
 
 	<-time.After(1 * time.Second)
 }

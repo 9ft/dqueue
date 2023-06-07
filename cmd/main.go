@@ -15,11 +15,11 @@ func main() {
 
 	q := dq.New(dq.WithLogMode(dq.Trace))
 
-	q.Consume(ctx, dq.HandlerFunc(func(ctx context.Context, m *dq.ConsumerMessage) error {
+	q.Consume(ctx, func(ctx context.Context, m *dq.ConsumerMessage) error {
 		bs, _ := json.Marshal(m)
 		fmt.Println(time.Now(), "consume message:", string(bs))
 		return nil
-	}))
+	})
 
 	// produce realtime message
 	for i := 0; i < 10; i++ {

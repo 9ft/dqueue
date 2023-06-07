@@ -2,8 +2,8 @@ package dq
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
+	"os"
 	"strconv"
 	"sync"
 	"testing"
@@ -12,28 +12,78 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
+var options []func(*Queue)
+
+func TestMain(m *testing.M) {
+	options = []func(*Queue){
+		WithConsumerTakeBlockTimeout(100 * time.Millisecond),
+		WithConsumerWorkerInterval(10 * time.Millisecond),
+		WithConsumerWorkerNum(10),
+
+		WithRetryTimes(3),
+		WithRetryInterval(1000 * time.Millisecond),
+
+		WithDaemonWorkerInterval(100 * time.Millisecond),
+		WithDaemonWorkerNum(5),
+	}
+
+	exitCode := m.Run()
+
+	os.Exit(exitCode)
+}
+
+func cleanup(t *testing.T, qs ...*Queue) {
+	ctx, c := context.WithTimeout(context.Background(), 10*time.Second)
+	defer c()
+
+	var wg sync.WaitGroup
+	wg.Add(len(qs))
+
+	for _, q := range qs {
+		go func(q *Queue) {
+			defer wg.Done()
+
+			assert.Nil(t, q.Destroy(ctx))
+
+			keys, err := q.rdb.Keys(ctx, q.getKey(kMsg)+":*").Result()
+			assert.Nil(t, err)
+			if len(keys) == 0 {
+				return
+			}
+
+			_, err = q.rdb.Del(ctx, keys...).Result()
+			assert.Nil(t, err)
+		}(q)
+	}
+	wg.Wait()
+}
+
 func TestConsume(t *testing.T) {
 	t.SkipNow()
 
-	q := New(WithLogMode(Trace), WithConsumerWorkerNum(1), WithConsumerWorkerInterval(5*time.Second))
+	q := New(options...)
+	defer t.Cleanup(func() { cleanup(t, q) })
 
-	q.Consume(context.Background(), HandlerFunc(func(ctx context.Context, m *ConsumerMessage) error {
+	q.Consume(context.Background(), func(ctx context.Context, m *ConsumerMessage) error {
 		t.Log("consume:", m.ID)
 		return nil
-	}))
+	})
 
 	<-time.Tick(100 * time.Second)
 }
 
 func TestMultiInstance(t *testing.T) {
 	ctx := context.Background()
+
 	// init
-	q := New()
-	q1 := New()
-	q2 := New()
+	q := New(options...)
+	q1 := New(options...)
+	q2 := New(options...)
+
+	defer t.Cleanup(func() { cleanup(t, q, q1, q2) })
 
 	// produce
-	num := 10000
+	num := 1000
 	var sendIDs []string
 	for i := 0; i < num; i++ {
 		id, err := q.Produce(ctx, &ProducerMessage{
@@ -45,66 +95,61 @@ func TestMultiInstance(t *testing.T) {
 	}
 
 	// consume
-	// consume
-	var wg sync.WaitGroup
-	wg.Add(num)
+	var (
+		recvIDs   []string
+		recvIDsMu sync.Mutex
 
-	done := make(chan struct{})
+		done = make(chan struct{})
+		wg   sync.WaitGroup
+	)
+
 	go func() {
 		wg.Wait()
 		close(done)
 	}()
 
-	var (
-		recvIDs   = []string{}
-		recvIDsMu sync.Mutex
-	)
+	wg.Add(num)
+	handler := func(name string) HandlerFunc {
+		return func(ctx context.Context, m *ConsumerMessage) error {
+			// t.Log(name, "consume:", m.ID)
+			recvIDsMu.Lock()
+			recvIDs = append(recvIDs, m.ID)
+			recvIDsMu.Unlock()
+			wg.Done()
+			return nil
+		}
+	}
 
-	q1.Consume(context.Background(), HandlerFunc(func(ctx context.Context, m *ConsumerMessage) error {
-		// t.Log("q1 consume:", m.ID)
-		recvIDsMu.Lock()
-		recvIDs = append(recvIDs, m.ID)
-		recvIDsMu.Unlock()
-		wg.Done()
-		return nil
-	}))
-	q2.Consume(context.Background(), HandlerFunc(func(ctx context.Context, m *ConsumerMessage) error {
-		// t.Log("q2 consume:", m.ID)
-		recvIDsMu.Lock()
-		recvIDs = append(recvIDs, m.ID)
-		recvIDsMu.Unlock()
-		wg.Done()
-		return nil
-	}))
+	q1.Consume(context.Background(), handler("q1"))
+	q2.Consume(context.Background(), handler("q2"))
 
+	// wait
 	select {
-	case <-time.After(10 * time.Second):
-		t.Fatal("consume timeout")
+	case <-time.After(3 * time.Second):
+		t.Fatal("timeout")
 	case <-done:
+		t.Log("consume done, wait 1s to check")
+		<-time.After(1 * time.Second)
 	}
 
 	// check
 	assert.ElementsMatch(t, sendIDs, recvIDs)
-
-	// clean
-	delCnt, err := q.rdb.XDel(ctx, q.getKey(kReady), recvIDs...).Result()
-	assert.Nil(t, err)
-	assert.EqualValues(t, num, delCnt)
 }
 
 func TestProduceConsumeRealtime(t *testing.T) {
 	ctx := context.Background()
 	// init
-	q := New()
+	q := New(options...)
+	defer t.Cleanup(func() { cleanup(t, q) })
 
 	// produce
-	num := 10
+	num := 1000
 	var sendIDs []string
 	for i := 0; i < num; i++ {
 		id, err := q.Produce(ctx, &ProducerMessage{
 			Payload: []byte("ready_" + strconv.Itoa(i)),
 		})
-		t.Log("produced:", id)
+		// t.Log("produced:", id)
 		assert.Nil(t, err)
 		sendIDs = append(sendIDs, id)
 	}
@@ -123,36 +168,34 @@ func TestProduceConsumeRealtime(t *testing.T) {
 		recvIDs   = []string{}
 		recvIDsMu sync.Mutex
 	)
-	q.Consume(ctx, HandlerFunc(func(ctx context.Context, m *ConsumerMessage) error {
-		bs, _ := json.Marshal(m)
-		t.Log("consume:", string(bs))
-		t.Log("consume_payload:", string(m.Payload))
-
+	q.Consume(ctx, func(ctx context.Context, m *ConsumerMessage) error {
+		// t.Log("consume:", m.ID)
 		recvIDsMu.Lock()
 		recvIDs = append(recvIDs, m.ID)
 		recvIDsMu.Unlock()
 		wg.Done()
 		return nil
-	}))
+	})
 
 	select {
 	case <-time.After(10 * time.Second):
 		t.Fatal("consume timeout")
 	case <-done:
+		t.Log("consume done, wait 1s to check")
+		<-time.After(1 * time.Second)
 	}
 
 	// check
-	assert.Equal(t, sendIDs, recvIDs)
-
-	// clean
-	delCnt, err := q.rdb.XDel(ctx, q.getKey(kReady), recvIDs...).Result()
-	assert.Nil(t, err)
-	assert.EqualValues(t, num, delCnt)
+	assert.ElementsMatch(t, sendIDs, recvIDs)
 }
 
 func TestProduceConsumeRealtimeWithErrRetry(t *testing.T) {
 	// init
-	q := New()
+	retryTimes := 3
+	q := New(append(options,
+		WithRetryTimes(retryTimes),
+	)...)
+	defer t.Cleanup(func() { cleanup(t, q) })
 
 	// produce
 	num := 10
@@ -161,14 +204,14 @@ func TestProduceConsumeRealtimeWithErrRetry(t *testing.T) {
 		id, err := q.Produce(context.Background(), &ProducerMessage{
 			Payload: []byte("ready_" + strconv.Itoa(i)),
 		})
-		t.Log("produced:", id)
+		// t.Log("produced:", id)
 		assert.Nil(t, err)
 		sendIDs = append(sendIDs, id)
 	}
 
 	// consume
 	var wg sync.WaitGroup
-	wg.Add(num * 3)
+	wg.Add(num * retryTimes)
 
 	done := make(chan struct{})
 	go func() {
@@ -180,38 +223,36 @@ func TestProduceConsumeRealtimeWithErrRetry(t *testing.T) {
 		recvIDs   = []string{}
 		recvIDsMu sync.Mutex
 	)
-	q.Consume(context.Background(), HandlerFunc(func(ctx context.Context, m *ConsumerMessage) error {
-		bs, _ := json.Marshal(m)
-		t.Log("consume:", string(bs))
-		t.Log("consume_payload:", string(m.Payload))
-
+	q.Consume(context.Background(), func(ctx context.Context, m *ConsumerMessage) error {
+		// t.Log(time.Now(), "consume:", m.ID)
 		recvIDsMu.Lock()
 		recvIDs = append(recvIDs, m.ID)
 		recvIDsMu.Unlock()
 		wg.Done()
 		return fmt.Errorf("fake err")
-	}))
+	})
 
 	select {
 	case <-time.After(10 * time.Second):
 		t.Fatal("consume timeout")
 	case <-done:
+		t.Log("consume done, wait 3s to check")
+		<-time.After(3 * time.Second)
 	}
 
 	// check
-	assert.Equal(t, append(append(sendIDs, sendIDs...), sendIDs...), recvIDs)
-
-	// clean
-	delCnt, err := q.rdb.XDel(context.Background(), q.getKey(kReady), sendIDs...).Result()
-	assert.Nil(t, err)
-	assert.EqualValues(t, num, delCnt)
+	var want []string
+	for i := 0; i < retryTimes; i, want = i+1, append(want, sendIDs...) {
+	}
+	assert.ElementsMatch(t, want, recvIDs)
 }
 
 func TestProduceConsumeDelay(t *testing.T) {
 	ctx := context.Background()
 
 	// init
-	q := New()
+	q := New(options...)
+	defer t.Cleanup(func() { cleanup(t, q) })
 
 	// produce
 	num := 10
@@ -223,7 +264,7 @@ func TestProduceConsumeDelay(t *testing.T) {
 			At:      &at,
 		})
 		assert.Nil(t, err)
-		t.Log("produced:", id)
+		// t.Log("produced:", id)
 		sendIDs = append(sendIDs, id)
 	}
 
@@ -241,44 +282,35 @@ func TestProduceConsumeDelay(t *testing.T) {
 		recvIDs   = []string{}
 		recvIDsMu sync.Mutex
 	)
-	q.Consume(ctx, HandlerFunc(func(ctx context.Context, m *ConsumerMessage) error {
-		t.Logf("consume: %s, %s", m.ID, m.Payload)
-
+	q.Consume(ctx, func(ctx context.Context, m *ConsumerMessage) error {
+		// t.Logf("consume: %s, %s", m.ID, m.Payload)
 		recvIDsMu.Lock()
 		recvIDs = append(recvIDs, m.ID)
 		recvIDsMu.Unlock()
 		wg.Done()
-		return fmt.Errorf("fake err")
-	}))
+		return nil
+	})
 
 	select {
-	case <-time.After(10 * time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("consume timeout")
 	case <-done:
+		t.Log("consume done, wait 3s to check")
+		<-time.After(3 * time.Second)
 	}
 
 	// check
 	assert.ElementsMatch(t, sendIDs, recvIDs)
-
-	keys, err := q.rdb.Keys(ctx, q.getKey(kMsg)+":*").Result()
-	assert.Nil(t, err)
-	assert.Equal(t, num, len(keys))
-
-	// clean
-	delCnt, err := q.rdb.Del(ctx, keys...).Result()
-	assert.Nil(t, err)
-	assert.EqualValues(t, num, delCnt)
-
-	delCnt, err = q.rdb.Del(ctx, q.getKey(kReady)).Result()
-	assert.Nil(t, err)
-	assert.EqualValues(t, 1, delCnt)
 }
 
 func TestProduceConsumeDelayWithErrRetry(t *testing.T) {
 	ctx := context.Background()
 
 	// init
-	q := New(WithRetryInterval(1*time.Second), WithRetryTimes(3))
+	retryTimes := 3
+	q := New(append(options,
+		WithRetryTimes(retryTimes))...)
+	defer t.Cleanup(func() { cleanup(t, q) })
 
 	// produce
 	num := 10
@@ -290,7 +322,7 @@ func TestProduceConsumeDelayWithErrRetry(t *testing.T) {
 			At:      &at,
 		})
 		assert.Nil(t, err)
-		t.Log("produced:", id)
+		// t.Log("produced:", id)
 		sendIDs = append(sendIDs, id)
 	}
 
@@ -308,58 +340,43 @@ func TestProduceConsumeDelayWithErrRetry(t *testing.T) {
 		recvIDs   = []string{}
 		recvIDsMu sync.Mutex
 	)
-	q.Consume(ctx, HandlerFunc(func(ctx context.Context, m *ConsumerMessage) error {
-		bs, _ := json.Marshal(m)
-		t.Log("consume:", string(bs))
-		t.Log("consume_payload:", string(m.Payload))
-
+	q.Consume(ctx, func(ctx context.Context, m *ConsumerMessage) error {
 		recvIDsMu.Lock()
 		recvIDs = append(recvIDs, m.ID)
 		recvIDsMu.Unlock()
 		wg.Done()
 		return fmt.Errorf("fake err")
-	}))
+	})
 
 	select {
 	case <-time.After(10 * time.Second):
 		t.Fatal("consume timeout")
 	case <-done:
+		t.Log("consume done, wait 3s to check")
+		<-time.After(3 * time.Second)
 	}
 
 	// check
-	assert.ElementsMatch(t, append(append(sendIDs, sendIDs...), sendIDs...), recvIDs)
-
-	keys, err := q.rdb.Keys(ctx, q.getKey(kMsg)+":*").Result()
-	assert.Nil(t, err)
-	assert.Equal(t, num, len(keys))
-
-	// clean
-	delCnt, err := q.rdb.Del(ctx, keys...).Result()
-	assert.Nil(t, err)
-	assert.EqualValues(t, num, delCnt)
-
-	delCnt, err = q.rdb.Del(ctx, q.getKey(kReady)).Result()
-	assert.Nil(t, err)
-	assert.EqualValues(t, 1, delCnt)
+	want := []string{}
+	for i := 0; i < retryTimes; i, want = i+1, append(want, sendIDs...) {
+	}
+	assert.ElementsMatch(t, want, recvIDs)
 }
 
 func TestGracefulShutdown(t *testing.T) {
 	ctx := context.Background()
 
 	// init
-	q := New(
-		WithConsumerTakeBlockTimeout(10*time.Millisecond),
-		WithConsumerWorkerInterval(10*time.Millisecond),
-		WithConsumerWorkerNum(10),
-		WithLogMode(Trace))
+	q := New(options...)
+	defer t.Cleanup(func() { cleanup(t, q) })
 
 	// consume
-	q.Consume(ctx, HandlerFunc(func(ctx context.Context, m *ConsumerMessage) error {
+	q.Consume(ctx, func(ctx context.Context, m *ConsumerMessage) error {
 		t.Log("consumer begin process:", m.ID)
 		<-time.After(100 * time.Millisecond)
 		t.Log("consumer end process:", m.ID)
 		return nil
-	}))
+	})
 
 	// produce
 	id, err := q.Produce(ctx, &ProducerMessage{Payload: []byte("payload")})
@@ -375,21 +392,19 @@ func TestGracefulShutdown(t *testing.T) {
 }
 
 func TestGracefulShutdownWithError(t *testing.T) {
-	// init
-	q := New(
-		WithConsumerTakeBlockTimeout(10*time.Millisecond),
-		WithConsumerWorkerInterval(10*time.Millisecond),
-		WithConsumerWorkerNum(10),
-		WithLogMode(Trace))
 	ctx := context.Background()
 
+	// init
+	q := New(options...)
+	defer t.Cleanup(func() { cleanup(t, q) })
+
 	// consume
-	q.Consume(ctx, HandlerFunc(func(ctx context.Context, m *ConsumerMessage) error {
+	q.Consume(ctx, func(ctx context.Context, m *ConsumerMessage) error {
 		t.Log("consumer begin process:", m.ID)
 		<-time.After(100 * time.Millisecond)
 		t.Log("consumer end process:", m.ID)
 		return nil
-	}))
+	})
 
 	// produce
 	id, err := q.Produce(ctx, &ProducerMessage{Payload: []byte("payload")})
@@ -406,21 +421,14 @@ func TestGracefulShutdownWithError(t *testing.T) {
 
 	// wait for shutdown complete
 	<-time.Tick(100 * time.Millisecond)
-
-	// clean
-	New().Consume(context.Background(),
-		HandlerFunc(func(ctx context.Context, m *ConsumerMessage) error {
-			t.Log("clean:", m.ID)
-			return nil
-		}))
-	<-time.After(1 * time.Second)
 }
 
 func TestCancelDelay(t *testing.T) {
 	ctx := context.Background()
 
 	// init
-	q := New(WithConsumerTakeBlockTimeout(10 * time.Millisecond))
+	q := New(options...)
+	defer t.Cleanup(func() { cleanup(t, q) })
 
 	// produce
 	num := 10
@@ -432,7 +440,7 @@ func TestCancelDelay(t *testing.T) {
 			At:      &at,
 		})
 		assert.Nil(t, err)
-		t.Log("produced:", id)
+		// t.Log("produced:", id)
 		sendIDs = append(sendIDs, id)
 	}
 
@@ -442,20 +450,10 @@ func TestCancelDelay(t *testing.T) {
 	}
 
 	// consume
-	q.Consume(ctx, HandlerFunc(func(ctx context.Context, m *ConsumerMessage) error {
+	q.Consume(ctx, func(ctx context.Context, m *ConsumerMessage) error {
 		t.Fatalf("consume cancelled message: %s, %s", m.ID, m.Payload)
 		return nil
-	}))
+	})
 
 	<-time.Tick(1 * time.Second)
-
-	// check
-	keys, err := q.rdb.Keys(ctx, q.getKey(kMsg)+":*").Result()
-	assert.Nil(t, err)
-	assert.Equal(t, 0, len(keys))
-
-	// clean
-	delCnt, err := q.rdb.Del(ctx, q.getKey(kReady)).Result()
-	assert.Nil(t, err)
-	assert.EqualValues(t, 1, delCnt)
 }

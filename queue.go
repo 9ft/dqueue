@@ -35,13 +35,6 @@ func New(options ...func(*Queue)) *Queue {
 		opt(&q)
 	}
 
-	q.shutdown = make(chan struct{})
-	q.consumeDone = make(chan struct{})
-	q.retryDone = make(chan struct{})
-	q.processDone = make(chan struct{})
-	q.ackDone = make(chan struct{})
-	q.done = make(chan struct{})
-
 	if q.rdb.Client == nil {
 		q.rdb.Client = redis.NewClient(&redis.Options{
 			Addr: "127.0.0.1:6379",
@@ -58,7 +51,17 @@ func New(options ...func(*Queue)) *Queue {
 }
 
 func (q *Queue) Close(ctx context.Context) error {
+	if q.shutdown == nil {
+		q.log(ctx, Info, "queue %s already closed", q.name)
+		return nil
+	}
+
+	q.log(ctx, Info, "queue %s closing", q.name)
+
 	close(q.shutdown)
+	defer func() {
+		q.shutdown = nil
+	}()
 
 	// wait for all workers exit
 	// 1. stop consume
@@ -75,6 +78,13 @@ func (q *Queue) Close(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+func (q *Queue) Destroy(ctx context.Context) error {
+	q.log(ctx, Info, "destroy queue %s begin", q.name)
+	_ = q.Close(ctx)
+	_, err := q.rdb.Del(ctx, q.getKey(kReady), q.getKey(kDelay)).Result()
+	return err
 }
 
 type redisKey int
