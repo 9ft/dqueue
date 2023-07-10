@@ -34,44 +34,58 @@ type middlewareFunc func(Handler) Handler
 
 // Consume use Handler to process message
 func (q *Queue) Consume(ctx context.Context, h HandlerFunc) {
-	q.shutdown = make(chan struct{})
-	q.consumeDone = make(chan struct{})
-	q.retryDone = make(chan struct{})
-	q.processDone = make(chan struct{})
-	q.ackDone = make(chan struct{})
-	q.done = make(chan struct{})
-
 	msgCh := make(chan *ConsumerMessage, q.consumeWorkerNum)
 	ackCh := make(chan string, q.consumeWorkerNum)
 
-	go q.ack(ctx, ackCh)
-	go q.process(ctx, msgCh, ackCh, h)
-	go q.retry(ctx, msgCh, ackCh)
-	go q.consume(ctx, msgCh)
+	ackCtx, ackCancel := context.WithCancel(ctx)
+	q.ackCancel = ackCancel
+	go func() {
+		q.ackDone = make(chan error, 1)
+		q.ackDone <- q.ack(ackCtx, ackCh)
+	}()
+
+	processCtx, processCancel := context.WithCancel(ctx)
+	q.processCancel = processCancel
+	go func() {
+		q.processDone = make(chan error, 1)
+		q.processDone <- q.process(processCtx, msgCh, ackCh, h)
+	}()
+
+	retryCtx, retryCancel := context.WithCancel(ctx)
+	q.retryCancel = retryCancel
+	go func() {
+		q.retryDone = make(chan error, 1)
+		q.retryDone <- q.retry(retryCtx, msgCh, ackCh)
+	}()
+
+	consumeCtx, consumeCancel := context.WithCancel(ctx)
+	q.consumeCancel = consumeCancel
+	go func() {
+		q.consumeDone = make(chan error, 1)
+		q.consumeDone <- q.consume(consumeCtx, msgCh)
+	}()
+
+	q.consumeStatus.Store(true)
 }
 
-func (q *Queue) ack(ctx context.Context, ackCh chan string) {
+func (q *Queue) ack(ctx context.Context, ackCh chan string) error {
 	for {
 		select {
-		case <-q.ackDone:
-
+		case <-ctx.Done():
 			var ids []string
-			for len(ackCh) > 0 {
-				ids = append(ids, <-ackCh)
+			for ; len(ackCh) > 0; ids = append(ids, <-ackCh) {
 			}
 			if len(ids) != 0 {
-				cnt, err := q.rdb.XAck(ctx, q.getKey(kReady), "dq", ids...).Result()
+				cnt, err := q.rdb.XAck(ctx, q.key(kReady), q.streamGroup, ids...).Result()
 				if err != nil || cnt != int64(len(ids)) {
 					q.log(ctx, Warn, "commit message failed, want: %d, cnt: %d, err: %v", len(ids), cnt, err)
 				}
 			}
 
 			q.log(ctx, Trace, "ack worker exited")
-
-			close(q.done)
-			return
+			return nil
 		case id := <-ackCh:
-			cnt, err := q.rdb.XAck(ctx, q.getKey(kReady), "dq", id).Result()
+			cnt, err := q.rdb.XAck(ctx, q.key(kReady), q.streamGroup, id).Result()
 			if err != nil || cnt == 0 {
 				q.log(ctx, Warn, "commit message failed, id: %s, cnt: %d, err: %v", id, cnt, err)
 				ackCh <- id
@@ -82,7 +96,7 @@ func (q *Queue) ack(ctx context.Context, ackCh chan string) {
 	}
 }
 
-func (q *Queue) consume(ctx context.Context, msgCh chan<- *ConsumerMessage) {
+func (q *Queue) consume(ctx context.Context, msgCh chan<- *ConsumerMessage) error {
 	var wg sync.WaitGroup
 	wg.Add(q.consumeWorkerNum)
 
@@ -100,7 +114,7 @@ func (q *Queue) consume(ctx context.Context, msgCh chan<- *ConsumerMessage) {
 			lastOk := make(chan struct{}, 1)
 			for {
 				select {
-				case <-q.shutdown:
+				case <-ctx.Done():
 					wg.Done()
 					return
 				case <-lastOk:
@@ -109,7 +123,7 @@ func (q *Queue) consume(ctx context.Context, msgCh chan<- *ConsumerMessage) {
 					}
 				}
 
-				cm, err := q.takeMessage(ctx, q.consumeTakeBlockTimeout)
+				cm, err := q.takeNormal(ctx)
 				if err == takeNil {
 					continue
 				}
@@ -126,10 +140,10 @@ func (q *Queue) consume(ctx context.Context, msgCh chan<- *ConsumerMessage) {
 
 	wg.Wait()
 	q.log(ctx, Trace, "consume workers exited")
-	close(q.retryDone)
+	return nil
 }
 
-func (q *Queue) retry(ctx context.Context, msgCh chan<- *ConsumerMessage, ackChan chan<- string) {
+func (q *Queue) retry(ctx context.Context, msgCh chan<- *ConsumerMessage, ackChan chan<- string) error {
 	var wg sync.WaitGroup
 	wg.Add(q.consumeWorkerNum)
 
@@ -145,9 +159,11 @@ func (q *Queue) retry(ctx context.Context, msgCh chan<- *ConsumerMessage, ackCha
 			defer ticker.Stop()
 
 			lastOk := make(chan struct{}, 1)
+
+			start := ""
 			for {
 				select {
-				case <-q.retryDone:
+				case <-ctx.Done():
 					wg.Done()
 					return
 				case <-lastOk:
@@ -156,7 +172,8 @@ func (q *Queue) retry(ctx context.Context, msgCh chan<- *ConsumerMessage, ackCha
 					}
 				}
 
-				cm, err := q.takeMessageRetry(ctx, ackChan)
+				cm, startNew, err := q.takeRetry(ctx, start, ackChan)
+				start = startNew
 				if err == takeNil {
 					continue
 				}
@@ -173,22 +190,17 @@ func (q *Queue) retry(ctx context.Context, msgCh chan<- *ConsumerMessage, ackCha
 
 	wg.Wait()
 	q.log(ctx, Trace, "retry workers exited")
-	close(q.processDone)
+	return nil
 }
 
 var takeNil = errors.New("take nil")
 
-func (q *Queue) takeMessage(ctx context.Context, blockTimeout time.Duration) (*ConsumerMessage, error) {
-	rq := q.getKey(kReady) // list
-	pq := q.getKey(kRetry) // zset
-	mq := q.getKey(kMsg)
-
-	id, retryCount, data, err := q.rdb.takeMessageStream(ctx,
-		rq, pq, mq,
-		blockTimeout,
-		q.retryEnable,
-		q.retryInterval,
-		int(q.messageSaveTime.Seconds()))
+func (q *Queue) takeNormal(ctx context.Context) (*ConsumerMessage, error) {
+	id, data, retryCount, err := q.rdb.streamRead(ctx,
+		q.key(kReady),
+		q.streamGroup,
+		q.streamConsumer,
+		q.consumeTakeBlockTimeout)
 
 	if err == takeNil {
 		return nil, takeNil
@@ -198,52 +210,48 @@ func (q *Queue) takeMessage(ctx context.Context, blockTimeout time.Duration) (*C
 		return nil, fmt.Errorf("take message failed, err: %v", err)
 	}
 
-	cm, err := parseData(ctx, q.rdb, mq, id, retryCount, data)
-	if cm == nil {
-		return nil, fmt.Errorf("parse message failed, data: %v, err: %v", data, err)
+	m, err := q.assemble(ctx, id, data, retryCount)
+	if m == nil {
+		return nil, fmt.Errorf("assemble message failed, data: %v, err: %v", data, err)
 	}
-	return cm, nil
+	return m, nil
 }
 
-func (q *Queue) takeMessageRetry(ctx context.Context, ackChan chan<- string) (*ConsumerMessage, error) {
-	rq := q.getKey(kReady) // list
-	pq := q.getKey(kRetry) // zset
-	mq := q.getKey(kMsg)
-
-	id, retryCount, data, err := q.rdb.takeMessageStreamRetry(ctx,
-		rq, pq, mq,
-		q.retryEnable,
+func (q *Queue) takeRetry(ctx context.Context, start string, ackChan chan<- string) (*ConsumerMessage, string, error) {
+	if start == "" {
+		start = "-"
+	}
+	id, retryCount, startNew, data, err := q.rdb.streamRetry(ctx,
+		q.key(kReady),
+		q.streamGroup,
+		q.streamConsumer,
 		q.retryInterval,
-		q.retryTimes,
-		int(q.messageSaveTime.Seconds()),
-		ackChan)
+		start)
+
+	if retryCount >= q.retryTimes {
+		// reach max retry count, ack it
+		ackChan <- id
+		// TODO add to dead process
+		return nil, "", takeNil
+	}
 
 	if err == takeNil {
-		return nil, takeNil
+		return nil, "", takeNil
 	}
 
 	if err != nil {
-		return nil, fmt.Errorf("take message failed, err: %v", err)
+		return nil, "", fmt.Errorf("takeNormal message failed, err: %v", err)
 	}
 
-	cm, err := parseData(ctx, q.rdb, mq, id, retryCount, data)
-	if cm == nil {
-		return nil, fmt.Errorf("parse message failed, data: %v, err: %v", data, err)
+	m, err := q.assemble(ctx, id, data, retryCount)
+	if m == nil {
+		return nil, "", fmt.Errorf("assemble message failed, data: %v, err: %v", data, err)
 	}
-	return cm, nil
+
+	return m, startNew, nil
 }
 
-func (q *Queue) process(ctx context.Context, msgCh <-chan *ConsumerMessage, ackCh chan<- string, h Handler) {
-	defer func() {
-		if r := recover(); r != nil {
-			q.log(ctx, Error, "process panic, err: %v", r)
-		}
-	}()
-
-	for i := len(q.mws) - 1; i >= 0; i-- {
-		h = q.mws[i](h)
-	}
-
+func (q *Queue) process(ctx context.Context, msgCh <-chan *ConsumerMessage, ackCh chan<- string, h Handler) error {
 	var wg sync.WaitGroup
 	wg.Add(q.consumeWorkerNum)
 
@@ -251,85 +259,57 @@ func (q *Queue) process(ctx context.Context, msgCh <-chan *ConsumerMessage, ackC
 		go func(i int) {
 			for {
 				select {
-				case <-q.processDone:
+				case <-ctx.Done():
 					wg.Done()
 					return
 				case m := <-msgCh:
-					handlerCtx, cancel := context.WithTimeout(ctx, q.consumeTimeout)
-					defer cancel()
-					id := m.ID
-					if m.uuid != "" {
-						m.ID = m.uuid
-					}
-					if err := h.Process(handlerCtx, m); err != nil {
-						q.log(ctx, Warn, "process message failed, id: %s, err: %v", m.ID, err)
-						continue
-					}
-					q.log(ctx, Trace, "process message success, id: %s", m.ID)
+					func() {
+						defer func() {
+							if r := recover(); r != nil {
+								q.log(ctx, Error, "process panic, err: %v", r)
+							}
+						}()
 
-					if !q.retryEnable {
-						continue
-					}
+						handlerCtx, cancel := context.WithTimeout(ctx, q.consumeTimeout)
+						defer cancel()
+						id := m.ID
+						if m.uuid != "" {
+							m.ID = m.uuid
+						}
+						if err := h.Process(handlerCtx, m); err != nil {
+							q.log(ctx, Warn, "process message failed, id: %s, err: %v", m.ID, err)
+							return
+						}
+						q.log(ctx, Trace, "process message success, id: %s", m.ID)
 
-					ackCh <- id
+						if !q.retryEnable {
+							return
+						}
+						ackCh <- id
+					}()
 				}
 			}
 		}(i)
 	}
 
 	wg.Wait()
-
 	q.log(ctx, Trace, "process workers exited")
-	close(q.ackDone)
+	return nil
 }
 
-type messageBody struct {
-	ID    string `json:"id"`
-	DTime int    `json:"dtime"`
-	Data  string `json:"msg"`
-	CTime int64  `json:"ctime"`
-	Retry int    `json:"retry"`
-}
-
-func parse(text string) (*ConsumerMessage, error) {
-	var body messageBody
-	if err := json.Unmarshal([]byte(text), &body); err != nil {
-		return nil, fmt.Errorf("json unmarshal failed, err: %v", err)
-	}
-
-	bs, err := base64.StdEncoding.DecodeString(body.Data)
-	if err != nil {
-		return nil, fmt.Errorf("base64 decode failed, err: %v", err)
-	}
-
-	return &ConsumerMessage{
-		ID:       body.ID,
-		Payload:  bs,
-		CreateAt: time.UnixMilli(int64(body.CTime)),
-		DeliverAt: func() *time.Time {
-			if body.DTime == 0 {
-				return nil
-			}
-			t := time.UnixMilli(int64(body.DTime))
-			return &t
-		}(),
-		Retried: int32(body.Retry),
-	}, nil
-}
-
-type tmpdata struct {
+type msgData struct {
 	Ctime string `json:"ctime"`
 	Dtime string `json:"dtime"`
 	Msg   string `json:"msg"`
 }
 
-func parseData(ctx context.Context, r rdb, mq string, id string, retryCount int, data map[string]interface{}) (*ConsumerMessage, error) {
+func (q *Queue) assemble(ctx context.Context, id string, data map[string]interface{}, retryCount int) (*ConsumerMessage, error) {
 	if uuid, ok := data["uuid"]; ok {
 		// TODO need get data from redis
-		raw, _ := r.Get(ctx, mq+":"+uuid.(string)).Result()
+		raw, _ := q.rdb.Get(ctx, q.key(kMsg)+":"+uuid.(string)).Result()
 		// TODO handle err
 		// TODO if not exist, identify as canceled message, will not process
-		var dataNew tmpdata
+		var dataNew msgData
 		if err := json.Unmarshal([]byte(raw), &dataNew); err != nil {
 			return nil, fmt.Errorf("json unmarshal failed, err: %v", err)
 		}

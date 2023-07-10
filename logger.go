@@ -8,7 +8,7 @@ import (
 type LogLevel int
 
 const (
-	Slient LogLevel = iota
+	Silent LogLevel = iota
 	Error
 	Warn
 	Info
@@ -43,18 +43,18 @@ func (q *Queue) log(ctx context.Context, level LogLevel, msg string, data ...int
 
 type defaultLogger struct{}
 
-func (l defaultLogger) Error(ctx context.Context, msg string, data ...interface{}) {
+func (l defaultLogger) Error(_ context.Context, msg string, data ...interface{}) {
 	log.Printf("ERROR: "+msg, data...)
 }
 
-func (l defaultLogger) Warn(ctx context.Context, msg string, data ...interface{}) {
+func (l defaultLogger) Warn(_ context.Context, msg string, data ...interface{}) {
 	log.Printf("WARN: "+msg, data...)
 }
 
-func (l defaultLogger) Info(ctx context.Context, msg string, data ...interface{}) {
+func (l defaultLogger) Info(_ context.Context, msg string, data ...interface{}) {
 	log.Printf("INFO: "+msg, data...)
 }
 
-func (l defaultLogger) Trace(ctx context.Context, msg string, data ...interface{}) {
+func (l defaultLogger) Trace(_ context.Context, msg string, data ...interface{}) {
 	log.Printf("TRACE: "+msg, data...)
 }

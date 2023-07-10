@@ -12,7 +12,7 @@ func (q *Queue) daemon() {
 			for {
 				go func() {
 					ctx := context.Background()
-					cnt, err := q.rdb.zSetToStream(ctx, q.getKey(kDelay), q.getKey(kReady), time.Now())
+					cnt, err := q.rdb.zSetToStream(ctx, q.key(kDelay), q.key(kReady), time.Now())
 					if err != nil {
 						q.log(ctx, Warn, "daemon, delay to ready failed, err: %v", err)
 						return

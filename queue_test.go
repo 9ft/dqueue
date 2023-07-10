@@ -2,6 +2,7 @@ package dq
 
 import (
 	"context"
+	"fmt"
 	"strconv"
 	"sync"
 	"testing"
@@ -11,11 +12,10 @@ import (
 )
 
 func BenchmarkProduceReady(b *testing.B) {
-	q := New()
 	ctx := context.Background()
 
-	var wg sync.WaitGroup
-	wg.Add(b.N)
+	q := New()
+	defer b.Cleanup(func() { cleanup(nil, q) })
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -23,26 +23,17 @@ func BenchmarkProduceReady(b *testing.B) {
 		assert.Nil(b, err)
 	}
 	b.StopTimer()
-
-	q.Consume(context.Background(), func(ctx context.Context, m *ConsumerMessage) error {
-		wg.Done()
-		return nil
-	})
-
-	wg.Wait()
 }
 
 func BenchmarkProduceDelay(b *testing.B) {
-	q := New()
 	ctx := context.Background()
 
-	var wg sync.WaitGroup
-	wg.Add(b.N)
-
-	at := time.Now().Add(200 * time.Millisecond)
+	q := New()
+	defer b.Cleanup(func() { cleanup(nil, q) })
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
+		at := time.Now().Add(1 * time.Second)
 		_, err := q.Produce(ctx, &ProducerMessage{
 			Payload: []byte("payload" + strconv.Itoa(i)),
 			At:      &at,
@@ -50,21 +41,13 @@ func BenchmarkProduceDelay(b *testing.B) {
 		assert.Nil(b, err)
 	}
 	b.StopTimer()
-
-	q.Consume(context.Background(), func(ctx context.Context, m *ConsumerMessage) error {
-		wg.Done()
-		return nil
-	})
-
-	wg.Wait()
 }
 
-func BenchmarkConsume(b *testing.B) {
-	q := New(
-		WithConsumerWorkerNum(4),
-		WithConsumerWorkerInterval(1*time.Millisecond),
-	)
+func BenchmarkConsumeRealtime(b *testing.B) {
 	ctx := context.Background()
+
+	q := New(options...)
+	defer b.Cleanup(func() { cleanup(nil, q) })
 
 	var wg sync.WaitGroup
 	wg.Add(b.N)
@@ -81,13 +64,33 @@ func BenchmarkConsume(b *testing.B) {
 	})
 	wg.Wait()
 	b.StopTimer()
+}
 
-	_ = q.Close(context.Background())
+func BenchmarkConsumeDelay(b *testing.B) {
+	ctx := context.Background()
 
-	q.Consume(context.Background(), func(ctx context.Context, m *ConsumerMessage) error {
-		b.FailNow()
-		return nil
-	})
+	fmt.Println("B.N: ", b.N)
+
+	q := New(options...)
+	defer b.Cleanup(func() { cleanup(nil, q) })
+
+	var wg sync.WaitGroup
+	wg.Add(b.N)
+
+	for i := 0; i < b.N; i++ {
+		at := time.Now().Add(1 * time.Second)
+		_, err := q.Produce(ctx, &ProducerMessage{Payload: []byte("payload" + strconv.Itoa(i)), At: &at})
+		assert.Nil(b, err)
+	}
 
 	<-time.After(1 * time.Second)
+
+	b.ResetTimer()
+	q.Consume(context.Background(), func(ctx context.Context, m *ConsumerMessage) error {
+		wg.Done()
+		return nil
+	})
+	wg.Wait()
+	b.StopTimer()
+	fmt.Println("done")
 }

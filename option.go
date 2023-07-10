@@ -10,6 +10,10 @@ type opts struct {
 	// basic
 	name string
 
+	// redis stream
+	streamConsumer string
+	streamGroup    string
+
 	// daemon
 	daemonWorkerNum      int
 	daemonWorkerInterval time.Duration
@@ -39,6 +43,9 @@ func defaultOpts() opts {
 	return opts{
 		name: "default",
 
+		streamConsumer: "dq",
+		streamGroup:    "dq",
+
 		daemonWorkerNum:      1,
 		daemonWorkerInterval: 100 * time.Millisecond,
 
@@ -55,7 +62,7 @@ func defaultOpts() opts {
 		messageSaveTime: 1 * time.Hour,
 		streamMaxLen:    10000,
 
-		logMode: Slient,
+		logMode: Silent,
 		logger:  defaultLogger{},
 	}
 }

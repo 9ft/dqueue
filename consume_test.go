@@ -15,16 +15,16 @@ import (
 var options []func(*Queue)
 
 func TestMain(m *testing.M) {
-	options = []func(*Queue){
-		WithConsumerTakeBlockTimeout(100 * time.Millisecond),
+	options = []func(*Queue){WithConsumerTakeBlockTimeout(10 * time.Millisecond),
 		WithConsumerWorkerInterval(10 * time.Millisecond),
-		WithConsumerWorkerNum(10),
+		WithConsumerWorkerNum(5),
+		WithConsumerTimeout(100 * time.Millisecond),
 
 		WithRetryTimes(3),
 		WithRetryInterval(1000 * time.Millisecond),
 
-		WithDaemonWorkerInterval(100 * time.Millisecond),
-		WithDaemonWorkerNum(5),
+		WithDaemonWorkerInterval(10 * time.Millisecond),
+		WithDaemonWorkerNum(1),
 	}
 
 	exitCode := m.Run()
@@ -45,7 +45,7 @@ func cleanup(t *testing.T, qs ...*Queue) {
 
 			assert.Nil(t, q.Destroy(ctx))
 
-			keys, err := q.rdb.Keys(ctx, q.getKey(kMsg)+":*").Result()
+			keys, err := q.rdb.Keys(ctx, q.key(kMsg)+":*").Result()
 			assert.Nil(t, err)
 			if len(keys) == 0 {
 				return
@@ -96,8 +96,8 @@ func TestMultiInstance(t *testing.T) {
 
 	// consume
 	var (
-		recvIDs   []string
-		recvIDsMu sync.Mutex
+		recIDs   []string
+		recIDsMu sync.Mutex
 
 		done = make(chan struct{})
 		wg   sync.WaitGroup
@@ -112,14 +112,15 @@ func TestMultiInstance(t *testing.T) {
 	handler := func(name string) HandlerFunc {
 		return func(ctx context.Context, m *ConsumerMessage) error {
 			// t.Log(name, "consume:", m.ID)
-			recvIDsMu.Lock()
-			recvIDs = append(recvIDs, m.ID)
-			recvIDsMu.Unlock()
+			recIDsMu.Lock()
+			recIDs = append(recIDs, m.ID)
+			recIDsMu.Unlock()
 			wg.Done()
 			return nil
 		}
 	}
 
+	start := time.Now()
 	q1.Consume(context.Background(), handler("q1"))
 	q2.Consume(context.Background(), handler("q2"))
 
@@ -128,12 +129,12 @@ func TestMultiInstance(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("timeout")
 	case <-done:
-		t.Log("consume done, wait 1s to check")
+		t.Logf("consume done, num: %d, cost: %s, wait 1s to check", num, time.Since(start))
 		<-time.After(1 * time.Second)
 	}
 
 	// check
-	assert.ElementsMatch(t, sendIDs, recvIDs)
+	assert.ElementsMatch(t, sendIDs, recIDs)
 }
 
 func TestProduceConsumeRealtime(t *testing.T) {
@@ -165,14 +166,15 @@ func TestProduceConsumeRealtime(t *testing.T) {
 	}()
 
 	var (
-		recvIDs   = []string{}
-		recvIDsMu sync.Mutex
+		recIDs   []string
+		recIDsMu sync.Mutex
 	)
+	start := time.Now()
 	q.Consume(ctx, func(ctx context.Context, m *ConsumerMessage) error {
 		// t.Log("consume:", m.ID)
-		recvIDsMu.Lock()
-		recvIDs = append(recvIDs, m.ID)
-		recvIDsMu.Unlock()
+		recIDsMu.Lock()
+		recIDs = append(recIDs, m.ID)
+		recIDsMu.Unlock()
 		wg.Done()
 		return nil
 	})
@@ -181,12 +183,12 @@ func TestProduceConsumeRealtime(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("consume timeout")
 	case <-done:
-		t.Log("consume done, wait 1s to check")
+		t.Logf("consume done, num: %d, cost: %s, wait 1s to check", num, time.Since(start))
 		<-time.After(1 * time.Second)
 	}
 
 	// check
-	assert.ElementsMatch(t, sendIDs, recvIDs)
+	assert.ElementsMatch(t, sendIDs, recIDs)
 }
 
 func TestProduceConsumeRealtimeWithErrRetry(t *testing.T) {
@@ -198,7 +200,7 @@ func TestProduceConsumeRealtimeWithErrRetry(t *testing.T) {
 	defer t.Cleanup(func() { cleanup(t, q) })
 
 	// produce
-	num := 10
+	num := 1000
 	var sendIDs []string
 	for i := 0; i < num; i++ {
 		id, err := q.Produce(context.Background(), &ProducerMessage{
@@ -220,14 +222,14 @@ func TestProduceConsumeRealtimeWithErrRetry(t *testing.T) {
 	}()
 
 	var (
-		recvIDs   = []string{}
-		recvIDsMu sync.Mutex
+		recIDs   []string
+		recIDsMu sync.Mutex
 	)
 	q.Consume(context.Background(), func(ctx context.Context, m *ConsumerMessage) error {
 		// t.Log(time.Now(), "consume:", m.ID)
-		recvIDsMu.Lock()
-		recvIDs = append(recvIDs, m.ID)
-		recvIDsMu.Unlock()
+		recIDsMu.Lock()
+		recIDs = append(recIDs, m.ID)
+		recIDsMu.Unlock()
 		wg.Done()
 		return fmt.Errorf("fake err")
 	})
@@ -244,7 +246,7 @@ func TestProduceConsumeRealtimeWithErrRetry(t *testing.T) {
 	var want []string
 	for i := 0; i < retryTimes; i, want = i+1, append(want, sendIDs...) {
 	}
-	assert.ElementsMatch(t, want, recvIDs)
+	assert.ElementsMatch(t, want, recIDs)
 }
 
 func TestProduceConsumeDelay(t *testing.T) {
@@ -255,7 +257,7 @@ func TestProduceConsumeDelay(t *testing.T) {
 	defer t.Cleanup(func() { cleanup(t, q) })
 
 	// produce
-	num := 10
+	num := 1000
 	var sendIDs []string
 	for i := 0; i < num; i++ {
 		at := time.Now().Add(100 * time.Millisecond)
@@ -279,14 +281,14 @@ func TestProduceConsumeDelay(t *testing.T) {
 	}()
 
 	var (
-		recvIDs   = []string{}
-		recvIDsMu sync.Mutex
+		recIDs   []string
+		recIDsMu sync.Mutex
 	)
 	q.Consume(ctx, func(ctx context.Context, m *ConsumerMessage) error {
 		// t.Logf("consume: %s, %s", m.ID, m.Payload)
-		recvIDsMu.Lock()
-		recvIDs = append(recvIDs, m.ID)
-		recvIDsMu.Unlock()
+		recIDsMu.Lock()
+		recIDs = append(recIDs, m.ID)
+		recIDsMu.Unlock()
 		wg.Done()
 		return nil
 	})
@@ -300,7 +302,7 @@ func TestProduceConsumeDelay(t *testing.T) {
 	}
 
 	// check
-	assert.ElementsMatch(t, sendIDs, recvIDs)
+	assert.ElementsMatch(t, sendIDs, recIDs)
 }
 
 func TestProduceConsumeDelayWithErrRetry(t *testing.T) {
@@ -309,11 +311,13 @@ func TestProduceConsumeDelayWithErrRetry(t *testing.T) {
 	// init
 	retryTimes := 3
 	q := New(append(options,
-		WithRetryTimes(retryTimes))...)
+		WithRetryTimes(retryTimes),
+		WithRetryInterval(1*time.Second),
+	)...)
 	defer t.Cleanup(func() { cleanup(t, q) })
 
 	// produce
-	num := 10
+	num := 1000
 	var sendIDs []string
 	for i := 0; i < num; i++ {
 		at := time.Now().Add(100 * time.Millisecond)
@@ -337,13 +341,13 @@ func TestProduceConsumeDelayWithErrRetry(t *testing.T) {
 	}()
 
 	var (
-		recvIDs   = []string{}
-		recvIDsMu sync.Mutex
+		recIDs   []string
+		recIDsMu sync.Mutex
 	)
 	q.Consume(ctx, func(ctx context.Context, m *ConsumerMessage) error {
-		recvIDsMu.Lock()
-		recvIDs = append(recvIDs, m.ID)
-		recvIDsMu.Unlock()
+		recIDsMu.Lock()
+		recIDs = append(recIDs, m.ID)
+		recIDsMu.Unlock()
 		wg.Done()
 		return fmt.Errorf("fake err")
 	})
@@ -353,21 +357,21 @@ func TestProduceConsumeDelayWithErrRetry(t *testing.T) {
 		t.Fatal("consume timeout")
 	case <-done:
 		t.Log("consume done, wait 3s to check")
-		<-time.After(3 * time.Second)
+		<-time.After(5 * time.Second)
 	}
 
 	// check
-	want := []string{}
+	var want []string
 	for i := 0; i < retryTimes; i, want = i+1, append(want, sendIDs...) {
 	}
-	assert.ElementsMatch(t, want, recvIDs)
+	assert.ElementsMatch(t, want, recIDs)
 }
 
 func TestGracefulShutdown(t *testing.T) {
 	ctx := context.Background()
 
 	// init
-	q := New(options...)
+	q := New(append(options, WithLogMode(Trace))...)
 	defer t.Cleanup(func() { cleanup(t, q) })
 
 	// consume
@@ -395,7 +399,7 @@ func TestGracefulShutdownWithError(t *testing.T) {
 	ctx := context.Background()
 
 	// init
-	q := New(options...)
+	q := New(append(options, WithLogMode(Trace))...)
 	defer t.Cleanup(func() { cleanup(t, q) })
 
 	// consume
@@ -431,7 +435,7 @@ func TestCancelDelay(t *testing.T) {
 	defer t.Cleanup(func() { cleanup(t, q) })
 
 	// produce
-	num := 10
+	num := 1000
 	var sendIDs []string
 	for i := 0; i < num; i++ {
 		at := time.Now().Add(100 * time.Millisecond)

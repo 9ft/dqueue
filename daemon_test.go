@@ -29,7 +29,7 @@ func TestDaemonDelayToReady(t *testing.T) {
 	defer t.Cleanup(func() { cleanup(t, q) })
 
 	// produce
-	num := 10
+	num := 1000
 	var sendIDs []string
 	for i := 0; i < num; i++ {
 		at := time.Now().Add(100 * time.Millisecond)
@@ -53,14 +53,14 @@ func TestDaemonDelayToReady(t *testing.T) {
 	}()
 
 	var (
-		recvIDs   = []string{}
-		recvIDsMu sync.Mutex
+		recIDs   []string
+		recIDsMu sync.Mutex
 	)
 	q.Consume(ctx, func(ctx context.Context, m *ConsumerMessage) error {
-		t.Logf("consume: %s %s", m.ID, m.Payload)
-		recvIDsMu.Lock()
-		recvIDs = append(recvIDs, m.ID)
-		recvIDsMu.Unlock()
+		// t.Logf("consume: %s %s", m.ID, m.Payload)
+		recIDsMu.Lock()
+		recIDs = append(recIDs, m.ID)
+		recIDsMu.Unlock()
 		wg.Done()
 		return nil
 	})
@@ -74,5 +74,5 @@ func TestDaemonDelayToReady(t *testing.T) {
 	}
 
 	// check
-	assert.ElementsMatch(t, sendIDs, recvIDs)
+	assert.ElementsMatch(t, sendIDs, recIDs)
 }

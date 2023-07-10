@@ -40,18 +40,20 @@ func (q *Queue) enqueue(ctx context.Context, msg string, createAt time.Time, del
 	}
 
 	if deliverAt.Before(createAt) {
-		return q.enqueueReady(ctx, msg, createAt, deliverAt)
+		return q.enqueueReady(ctx, msg, createAt)
 	}
 	return q.enqueueDelay(ctx, msg, createAt, deliverAt)
 }
 
-func (q *Queue) enqueueReady(ctx context.Context, msg string, createAt time.Time, deliverAt *time.Time) (string, error) {
+func (q *Queue) enqueueReady(ctx context.Context, msg string, createAt time.Time) (string, error) {
 	id, err := q.rdb.XAdd(ctx, &redis.XAddArgs{
-		Stream: q.getKey(kReady),
+		Stream: q.key(kReady),
+		// NoMkStream: true,
 		MaxLen: q.streamMaxLen,
 		Approx: true,
 		ID:     "*",
 		Values: map[string]interface{}{
+			// TODO struct
 			"ctime": createAt.UnixMilli(),
 			"msg":   msg,
 		},
@@ -63,6 +65,7 @@ func (q *Queue) enqueueReady(ctx context.Context, msg string, createAt time.Time
 }
 
 func (q *Queue) enqueueDelay(ctx context.Context, msg string, createAt time.Time, deliverAt *time.Time) (string, error) {
+	// TODO struct
 	msgData := map[string]interface{}{
 		"ctime": fmt.Sprint(createAt.UnixMilli()),
 		"dtime": fmt.Sprint(deliverAt.UnixMilli()),
@@ -71,11 +74,11 @@ func (q *Queue) enqueueDelay(ctx context.Context, msg string, createAt time.Time
 	bs, _ := json.Marshal(msgData)
 
 	id := uuid.NewString()
-	return id, q.zAddSetEx(ctx, q.getKey(kDelay), q.getKey(kMsg), id, string(bs), deliverAt, int(q.messageSaveTime.Seconds()))
+	return id, q.zAddSetEx(ctx, q.key(kDelay), q.key(kMsg), id, string(bs), deliverAt, int(q.messageSaveTime.Seconds()))
 }
 
 func (q *Queue) Cancel(ctx context.Context, id string) error {
-	_, err := q.rdb.commit(ctx, q.getKey(kDelay), q.getKey(kRetry), q.getKey(kMsg), id)
+	_, err := q.rdb.commit(ctx, q.key(kDelay), q.key(kMsg), id)
 	if err != nil {
 		return fmt.Errorf("commit message failed, err: %v", err)
 	}
