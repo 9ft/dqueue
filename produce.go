@@ -9,11 +9,6 @@ import (
 	"github.com/google/uuid"
 )
 
-type ProducerMessage struct {
-	Payload []byte
-	At      *time.Time
-}
-
 func (q *Queue) Produce(ctx context.Context, m *ProducerMessage) (id string, err error) {
 	if m.Payload == nil {
 		return "", fmt.Errorf("payload is nil")
@@ -24,7 +19,7 @@ func (q *Queue) Produce(ctx context.Context, m *ProducerMessage) (id string, err
 		id,
 		base64.StdEncoding.EncodeToString(m.Payload),
 		time.Now(),
-		m.At)
+		m.DeliverAt)
 	if err != nil {
 		return "", fmt.Errorf("enqueue failed, err: %v", err)
 	}
@@ -32,22 +27,30 @@ func (q *Queue) Produce(ctx context.Context, m *ProducerMessage) (id string, err
 	return id, nil
 }
 
-var zeroTime = time.Unix(0, 0)
-
 func (q *Queue) enqueue(ctx context.Context, id, msg string, createAt time.Time, deliverAt *time.Time) error {
-	if deliverAt == nil {
-		deliverAt = &zeroTime
+	cm := &Message{
+		ProducerMessage: ProducerMessage{
+			Payload:   []byte(msg),
+			DeliverAt: deliverAt,
+		},
+
+		ID:       id,
+		CreateAt: time.Now(),
 	}
+
 	if deliverAt == nil || deliverAt.Before(createAt) {
-		return q.lPushSetEx(ctx, q.getKey(kReady), q.getKey(kMsg), id, msg, createAt, *deliverAt, int(q.messageSaveTime.Seconds()))
+		// realtime message
+		return q.runProduceRealtimeMsg(ctx, q.key(kReady), q.key(kData), cm, int(q.messageSaveTime.Seconds()))
 	}
-	return q.zAddSetEx(ctx, q.getKey(kDelay), q.getKey(kMsg), id, msg, createAt, deliverAt, int(q.messageSaveTime.Seconds()))
+
+	// delay message
+	return q.runProduceDelayMsg(ctx, q.key(kDelay), q.key(kData), cm, int(q.messageSaveTime.Seconds()))
 }
 
 func (q *Queue) Cancel(ctx context.Context, id string) error {
-	_, err := q.rdb.commit(ctx, q.getKey(kDelay), q.getKey(kRetry), q.getKey(kMsg), id)
+	_, err := q.rdb.Del(ctx, q.key(kData)+":"+id).Result()
 	if err != nil {
-		return fmt.Errorf("commit message failed, err: %v", err)
+		return fmt.Errorf("del message failed, err: %v", err)
 	}
 	return nil
 }

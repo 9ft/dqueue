@@ -8,7 +8,7 @@ import (
 type LogLevel int
 
 const (
-	Slient LogLevel = iota
+	Silent LogLevel = iota
 	Error
 	Warn
 	Info

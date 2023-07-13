@@ -15,7 +15,7 @@ func main() {
 
 	q := dq.New()
 
-	q.Consume(context.Background(), dq.HandlerFunc(func(ctx context.Context, m *dq.ConsumerMessage) error {
+	q.Consume(dq.HandlerFunc(func(ctx context.Context, m *dq.Message) error {
 		bs, _ := json.Marshal(m)
 		fmt.Println(time.Now(), "consume message:", string(bs))
 		return nil
@@ -33,8 +33,8 @@ func main() {
 	for i := 0; i < 10; i++ {
 		at := time.Now().Add(3 * time.Second)
 		id, err := q.Produce(ctx, &dq.ProducerMessage{
-			Payload: []byte("delay message, i =" + strconv.Itoa(i)),
-			At:      &at,
+			Payload:   []byte("delay message, i =" + strconv.Itoa(i)),
+			DeliverAt: &at,
 		})
 		fmt.Println(time.Now(), "produce delay message:", id, "err:", err)
 	}

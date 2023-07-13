@@ -11,8 +11,8 @@ type Queue struct {
 	opts
 	rdb
 
-	shutdown chan struct{}
-	done     chan struct{}
+	shutdownFunc context.CancelFunc
+	done         chan struct{}
 }
 
 type rdb struct {
@@ -30,21 +30,17 @@ func New(options ...func(*Queue)) *Queue {
 		opt(&q)
 	}
 
-	q.shutdown = make(chan struct{})
-	q.done = make(chan struct{})
-
 	if q.rdb.Client == nil {
 		q.rdb.Client = redis.NewClient(&redis.Options{
 			Addr: "127.0.0.1:6379",
 		})
 	}
 
-	go q.daemon()
 	return &q
 }
 
 func (q *Queue) Close(ctx context.Context) error {
-	close(q.shutdown)
+	q.shutdownFunc()
 
 	select {
 	case <-q.done:
@@ -63,19 +59,19 @@ const (
 	kReady redisKey = iota
 	kDelay
 	kRetry
-	kMsg
+	kData
 )
 
-func (q *Queue) getKey(k redisKey) string {
+func (q *Queue) key(k redisKey) string {
 	switch k {
 	case kReady:
-		return q.redisPrefix + "ready:" + q.name
+		return q.redisPrefix + q.name + ":ready"
 	case kDelay:
-		return q.redisPrefix + "delay:" + q.name
+		return q.redisPrefix + q.name + ":delay"
 	case kRetry:
-		return q.redisPrefix + "retry:" + q.name
-	case kMsg:
-		return q.redisPrefix + "msg:" + q.name
+		return q.redisPrefix + q.name + ":retry"
+	case kData:
+		return q.redisPrefix + q.name + ":data"
 	}
 	return ""
 }

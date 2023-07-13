@@ -17,22 +17,22 @@ func TestDaemon(t *testing.T) {
 
 	q := New()
 
-	q.daemon()
+	q.daemon(context.Background())
 
 	<-time.Tick(10 * time.Second)
 }
 
 func TestDaemonDelayToReady(t *testing.T) {
 	// init
-	q := New()
+	q := New(testOpts(t)...)
 
 	// produce
 	num := 10
 	at := time.Now().Add(10 * time.Millisecond)
 	for i := 0; i < num; i++ {
 		id, err := q.Produce(context.Background(), &ProducerMessage{
-			Payload: []byte("delay_" + strconv.Itoa(i)),
-			At:      &at,
+			Payload:   []byte("delay_" + strconv.Itoa(i)),
+			DeliverAt: &at,
 		})
 		assert.Nil(t, err)
 		t.Log("produce:", id)
@@ -48,7 +48,7 @@ func TestDaemonDelayToReady(t *testing.T) {
 		close(done)
 	}()
 
-	q.Consume(context.Background(), HandlerFunc(func(ctx context.Context, m *ConsumerMessage) error {
+	q.Consume(HandlerFunc(func(ctx context.Context, m *Message) error {
 		bs, _ := json.Marshal(m)
 		t.Log("consume:", string(bs))
 		t.Log("consume:", string(m.Payload))
@@ -66,7 +66,11 @@ func TestDaemonDelayToReady(t *testing.T) {
 
 func TestDaemonRetryToReady(t *testing.T) {
 	// init
-	q := New(WithRetryInterval(100 * time.Millisecond))
+	retry := 3
+	q := New(append(testOpts(t),
+		WithRetryTimes(retry),
+		WithRetryInterval(10*time.Millisecond),
+	)...)
 
 	// produce
 	num := 10
@@ -88,21 +92,17 @@ func TestDaemonRetryToReady(t *testing.T) {
 		close(done)
 	}()
 
-	q.Consume(context.Background(), HandlerFunc(func(ctx context.Context, m *ConsumerMessage) error {
-		bs, _ := json.Marshal(m)
-		t.Log("consume:", string(bs))
-		t.Log("consume:", string(m.Payload))
-
-		if m.Retried == 0 {
+	q.Consume(HandlerFunc(func(ctx context.Context, m *Message) error {
+		t.Logf("consume: %s, retried: %d", m.ID, m.DeliverCnt)
+		wg.Done()
+		if m.DeliverCnt == 1 {
 			return fmt.Errorf("retry mock")
 		}
-
-		wg.Done()
 		return nil
 	}))
 
 	select {
-	case <-time.After(500 * time.Millisecond):
+	case <-time.After(2 * time.Second):
 		t.Fatal("consume timeout")
 	case <-done:
 	}

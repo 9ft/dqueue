@@ -8,41 +8,43 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-var scriptLPushSetEx = redis.NewScript(`
+// scriptProduceRealtimeMsg is used to produce realtime message
+// 1. LPUSH list
+// 2. HSET msg
+// 3. EXPIRE msg
+var scriptProduceRealtimeMsg = redis.NewScript(`
 redis.call('LPUSH', KEYS[1], ARGV[1])
+redis.call('HSET', KEYS[2], unpack(ARGV, 3, #ARGV))
+redis.call('EXPIRE', KEYS[2], ARGV[2])`)
 
-local ctime = tonumber(ARGV[3])
-local dtime = tonumber(ARGV[4])
-
-local msg = cjson.encode({id=ARGV[1], ctime=ctime, dtime=dtime, data=ARGV[2]})
-redis.call('SET', KEYS[2] .. ':' .. ARGV[1], msg, 'EX', ARGV[5])`)
-
-func (r *rdb) lPushSetEx(ctx context.Context, list, data, id, msg string, createAt time.Time, deliverAt time.Time, expSec int) error {
-	err := scriptLPushSetEx.Run(ctx, r, []string{list, data}, id, msg, createAt.UnixMilli(), deliverAt.UnixMilli(), expSec).Err()
+func (r *rdb) runProduceRealtimeMsg(ctx context.Context, list, data string, m *Message, expSec int) error {
+	err := scriptProduceRealtimeMsg.Run(ctx, r,
+		[]string{list, data + ":" + m.ID}, append([]interface{}{m.ID, expSec}, m.values()...)).Err()
 	if err != redis.Nil && err != nil {
-		return fmt.Errorf("lpush and setex failed, err: %s", err)
+		return fmt.Errorf("script produce realtime msg failed, err: %s", err)
 	}
 	return nil
 }
 
-var scriptZAddSetEx = redis.NewScript(`
-local dtime = tonumber(ARGV[4])
-local ctime = tonumber(ARGV[3])
+// scriptProduceDelayMsg is used to produce delay message
+// 1. ZADD delay
+// 2. HSET msg
+// 3. EXPIRE msg
+var scriptProduceDelayMsg = redis.NewScript(`
+redis.call('ZADD', KEYS[1], ARGV[2], ARGV[1])
+redis.call('HSET', KEYS[2], unpack(ARGV, 4, #ARGV))
+redis.call('EXPIRE', KEYS[2], ARGV[3])`)
 
-redis.call('ZADD', KEYS[1], dtime, ARGV[1])
-local msg = cjson.encode({id=ARGV[1],ctime=ctime, dtime=dtime, data=ARGV[2]})
-redis.call('SET', KEYS[2] .. ':' .. ARGV[1], msg, 'EX', ARGV[5])`)
-
-func (r *rdb) zAddSetEx(ctx context.Context, zset, data, id, msg string, createAt time.Time, deliverAt *time.Time, expSec int) error {
-	err := scriptZAddSetEx.Run(ctx, r, []string{zset, data}, id, msg, createAt.UnixMilli(), deliverAt.UnixMilli(), expSec).Err()
+func (r *rdb) runProduceDelayMsg(ctx context.Context, zset, data string, m *Message, expSec int) error {
+	err := scriptProduceDelayMsg.Run(ctx, r,
+		[]string{zset, data + ":" + m.ID}, append([]interface{}{m.ID, m.DeliverAt.UnixMilli(), expSec}, m.values()...)).Err()
 	if err != redis.Nil && err != nil {
-		return fmt.Errorf("zadd and setex failed, err: %s", err)
+		return fmt.Errorf("script produce realtime msg failed, err: %s", err)
 	}
-
 	return nil
 }
 
-var scriptZSetToList = redis.NewScript(`
+var scriptZsetToList = redis.NewScript(`
 local members = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', ARGV[1], 'LIMIT', 0, 1000);
 if #members > 0 then
 	  for key, value in ipairs(members)
@@ -55,45 +57,41 @@ else
   return 0;
 end`)
 
-func (r *rdb) zSetToList(ctx context.Context, zset, list string, until time.Time) (cnt int, err error) {
-	return scriptZSetToList.Run(ctx, r, []string{zset, list}, until.UnixMilli()).Int()
+func (r *rdb) runZsetToList(ctx context.Context, zset, list string, until time.Time) (cnt int, err error) {
+	return scriptZsetToList.Run(ctx, r, []string{zset, list}, until.UnixMilli()).Int()
 }
 
-var scriptTakeMessage = redis.NewScript(`
+// scriptTakeMessage is used to take message
+// 1. RPOP list
+// 2. EXIST msg
+// 3. INCRBY msg
+// 4. ZADD retry
+// 5. HGETALL msg
+var scriptTakeMsg = redis.NewScript(`
 local id = redis.call('RPOP', KEYS[1]);
 if id == false then
 	return nil;
 end
 
-local msg = redis.call('GET', KEYS[3] .. ':' .. id);
-if msg == false then
+local exist = redis.call('EXISTS', KEYS[3] .. ':' .. id);
+if exist == 0 then
 	return nil;
 end
 
-if ARGV[1] == false then
+local cnt = redis.call('HINCRBY', KEYS[3] .. ':' .. id, 'deliver_cnt', 1);
+if cnt-1 > tonumber(ARGV[2]) then
 	redis.call('DEL', KEYS[3] .. ':' .. id);
-	return msg;
+	return nil;
 end
 
-redis.call('ZADD', KEYS[2], ARGV[2], id);
+redis.call('ZADD', KEYS[2], ARGV[1], id);
+return redis.call('HGETALL', KEYS[3] .. ':' .. id);`)
 
-local retried = 0;
-local obj = cjson.decode(msg);
-if obj.retry ~= nil then
-	retried = obj.retry;
-end
-obj.retry = retried + 1;
-
-local msg_new = cjson.encode(obj);
-redis.call('SET', KEYS[3] .. ':' .. id, msg_new, 'EX', ARGV[3]);
-
-return msg;`)
-
-func (r *rdb) takeMessage(ctx context.Context, list, retry, data string, retryEnable bool, retryInterval time.Duration, expSec int) (text string, err error) {
+func (r *rdb) runTakeMsg(ctx context.Context, list, retry, data string, retryInterval time.Duration, retryTimes int) ([]string, error) {
 	retryAt := time.Now().Add(retryInterval)
-	s, err := scriptTakeMessage.Run(ctx, r, []string{list, retry, data}, retryEnable, retryAt.UnixMilli(), expSec).Text()
+	s, err := scriptTakeMsg.Run(ctx, r, []string{list, retry, data}, retryAt.UnixMilli(), retryTimes).StringSlice()
 	if err != nil && err != redis.Nil {
-		return "", fmt.Errorf("script run failed, err: %v", err)
+		return nil, fmt.Errorf("script run failed, err: %v", err)
 	}
 	return s, nil
 }
@@ -103,10 +101,9 @@ func (r *rdb) takeMessage(ctx context.Context, list, retry, data string, retryEn
 var scriptCommit = redis.NewScript(`
 local id = ARGV[1];
 redis.call('ZREM', KEYS[1], id);
-redis.call('ZREM', KEYS[2], id);
-redis.call('DEL', KEYS[3] .. ':' .. id);
+redis.call('DEL', KEYS[2] .. ':' .. id);
 return 1;`)
 
-func (r *rdb) commit(ctx context.Context, delay, retry, data, id string) (int64, error) {
-	return scriptCommit.Run(ctx, r, []string{delay, retry, data}, id).Int64()
+func (r *rdb) runCommit(ctx context.Context, retry, data, id string) (int64, error) {
+	return scriptCommit.Run(ctx, r, []string{retry, data}, id).Int64()
 }
