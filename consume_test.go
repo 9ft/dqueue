@@ -147,6 +147,51 @@ func TestConsumeErrRetry(t *testing.T) {
 	}
 }
 
+func TestConsumeRedeliver(t *testing.T) {
+	// init
+	retry := 3
+	q := New(append(testOpts(t),
+		WithRetryTimes(retry),
+		WithRetryInterval(1000*time.Millisecond),
+	)...)
+	defer t.Cleanup(func() { cleanup(t, q) })
+
+	// produce
+	num := 10
+	var sendIDs []string
+	for i := 0; i < num; i++ {
+		id, err := q.Produce(context.Background(), &ProducerMessage{
+			Payload: []byte("ready_" + strconv.Itoa(i)),
+		})
+		assert.Nil(t, err)
+		sendIDs = append(sendIDs, id)
+	}
+
+	// consume
+	var wg sync.WaitGroup
+	wg.Add(num * (retry + 1))
+
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+
+	q.Consume(HandlerFunc(func(ctx context.Context, m *Message) error {
+		t.Log("consume:", m.DeliverCnt, string(m.Payload))
+		err := q.RedeliveryAfter(ctx, m.ID, 100*time.Millisecond)
+		fmt.Println("redelivery:", err)
+		wg.Done()
+		return fmt.Errorf("mock err")
+	}))
+
+	select {
+	case <-time.After(1000 * time.Millisecond):
+		t.Fatal("consume timeout")
+	case <-done:
+	}
+}
+
 func TestConsumePanicRetry(t *testing.T) {
 	// init
 	retry := 3

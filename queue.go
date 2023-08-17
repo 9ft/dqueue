@@ -23,7 +23,7 @@ type rdb struct {
 func New(options ...func(*Queue)) *Queue {
 	q := Queue{
 		opts: defaultOpts(),
-		rdb:  rdb{redisPrefix: "dq:"},
+		rdb:  rdb{redisPrefix: "dq"},
 	}
 
 	for _, opt := range options {
@@ -65,13 +65,13 @@ const (
 func (q *Queue) key(k redisKey) string {
 	switch k {
 	case kReady:
-		return q.redisPrefix + q.name + ":ready"
+		return q.redisPrefix + ":ready:" + q.name
 	case kDelay:
-		return q.redisPrefix + q.name + ":delay"
+		return q.redisPrefix + ":delay:" + q.name
 	case kRetry:
-		return q.redisPrefix + q.name + ":retry"
+		return q.redisPrefix + ":retry:" + q.name
 	case kData:
-		return q.redisPrefix + q.name + ":data"
+		return q.redisPrefix + ":msg:" + q.name
 	}
 	return ""
 }

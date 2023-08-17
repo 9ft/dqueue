@@ -107,3 +107,16 @@ return 1;`)
 func (r *rdb) runCommit(ctx context.Context, retry, data, id string) (int64, error) {
 	return scriptCommit.Run(ctx, r, []string{retry, data}, id).Int64()
 }
+
+var scriptZaddAndHset = redis.NewScript(`
+redis.call('ZADD', KEYS[1], ARGV[1], ARGV[2]);
+local exist = redis.call('EXISTS', KEYS[2] .. ':' .. ARGV[2]);
+if exist == 0 then
+	return nil;
+end
+return redis.call('HSET', KEYS[2] .. ':' .. ARGV[2], 're_deliver_at', ARGV[1]);
+`)
+
+func (r *rdb) runZaddAndHset(ctx context.Context, retry, data, id string, at time.Time) error {
+	return scriptZaddAndHset.Run(ctx, r, []string{retry, data}, at.UnixMilli(), id).Err()
+}

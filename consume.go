@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"sync"
 	"time"
-
-	"github.com/redis/go-redis/v9"
 )
 
 type Handler interface {
@@ -131,5 +129,5 @@ func (q *Queue) RedeliveryAfter(ctx context.Context, id string, dur time.Duratio
 }
 
 func (q *Queue) RedeliveryAt(ctx context.Context, id string, at time.Time) error {
-	return q.rdb.ZAdd(ctx, q.key(kRetry), redis.Z{Score: float64(at.UnixMilli()), Member: id}).Err()
+	return q.rdb.runZaddAndHset(ctx, q.key(kRetry), q.key(kData), id, at)
 }

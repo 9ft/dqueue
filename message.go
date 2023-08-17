@@ -16,9 +16,10 @@ type ProducerMessage struct {
 type Message struct {
 	ProducerMessage
 
-	ID         string
-	DeliverCnt int
-	CreateAt   time.Time
+	ID          string
+	CreateAt    time.Time
+	DeliverCnt  int
+	ReDeliverAt *time.Time
 }
 
 func (m *Message) values() []interface{} {
@@ -63,6 +64,10 @@ func (m *Message) parse(values []string) error {
 		case "deliver_cnt":
 			i, _ := strconv.ParseInt(values[i+1], 10, 64)
 			m.DeliverCnt = int(i)
+		case "re_deliver_at":
+			i, _ := strconv.ParseInt(values[i+1], 10, 64)
+			t := time.UnixMilli(i)
+			m.ReDeliverAt = &t
 		}
 	}
 	return nil
