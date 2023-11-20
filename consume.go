@@ -106,7 +106,19 @@ func (q *Queue) process(h Handler) error {
 
 		ctx, c := context.WithTimeout(ctx, q.consumeTimeout)
 		defer c()
-		if err = h.Process(ctx, &m); err != nil {
+		err = h.Process(ctx, &m)
+		if q.opts.metric != nil {
+			start := time.Now()
+			delay := start.Sub(m.CreateAt)
+			if m.DeliverAt != nil {
+				delay = start.Sub(*m.DeliverAt)
+			}
+			if m.ReDeliverAt != nil {
+				delay = start.Sub(*m.ReDeliverAt)
+			}
+			go q.opts.metric.Consume(delay, m.DeliverCnt, err)
+		}
+		if err != nil {
 			err = fmt.Errorf("process message failed, err: %v", err)
 		}
 	}()

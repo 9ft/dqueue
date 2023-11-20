@@ -10,6 +10,11 @@ import (
 )
 
 func (q *Queue) Produce(ctx context.Context, m *ProducerMessage) (id string, err error) {
+	defer func() {
+		if q.opts.metric != nil {
+			go q.opts.metric.Produce(m.DeliverAt != nil, err)
+		}
+	}()
 	if m.Payload == nil {
 		return "", fmt.Errorf("payload is nil")
 	}

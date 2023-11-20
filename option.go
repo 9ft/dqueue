@@ -30,6 +30,9 @@ type opts struct {
 	// logger
 	logMode LogLevel
 	logger  Logger
+
+	// metric
+	metric Metric
 }
 
 func defaultOpts() opts {
@@ -135,5 +138,11 @@ func WithRedis(rdb *redis.Client) func(*Queue) {
 func WithRedisKeyPrefix(prefix string) func(*Queue) {
 	return func(q *Queue) {
 		q.rdb.redisPrefix = prefix
+	}
+}
+
+func WithMetric(m Metric) func(*Queue) {
+	return func(q *Queue) {
+		q.metric = m
 	}
 }

@@ -23,7 +23,7 @@ func (q *Queue) daemon(ctx context.Context) {
 				case <-ticker.C:
 				}
 
-				{
+				go func() {
 					ctx := context.Background()
 					cnt, err := q.rdb.runZsetToList(ctx, q.key(kDelay), q.key(kReady), time.Now())
 					if err != nil {
@@ -33,9 +33,9 @@ func (q *Queue) daemon(ctx context.Context) {
 					if cnt > 0 {
 						q.log(ctx, Trace, "daemon, delay to ready, cnt: %d", cnt)
 					}
-				}
+				}()
 
-				{
+				go func() {
 					ctx := context.Background()
 					cnt, err := q.rdb.runZsetToList(ctx, q.key(kRetry), q.key(kReady), time.Now())
 					if err != nil {
@@ -45,8 +45,17 @@ func (q *Queue) daemon(ctx context.Context) {
 					if cnt > 0 {
 						q.log(ctx, Trace, "daemon, retry to ready, cnt: %d", cnt)
 					}
-				}
+				}()
 
+				go func() {
+					ctx := context.Background()
+					if q.opts.metric != nil {
+						go q.opts.metric.Queue(
+							int(q.rdb.LLen(ctx, q.key(kReady)).Val()),
+							int(q.rdb.ZCard(ctx, q.key(kDelay)).Val()),
+							int(q.rdb.ZCard(ctx, q.key(kRetry)).Val()))
+					}
+				}()
 			}
 		}(i)
 	}
