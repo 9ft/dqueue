@@ -39,7 +39,7 @@ func (r *rdb) runProduceDelayMsg(ctx context.Context, zset, data string, m *Mess
 	err := scriptProduceDelayMsg.Run(ctx, r,
 		[]string{zset, data + ":" + m.ID}, append([]interface{}{m.ID, m.DeliverAt.UnixMilli(), expSec}, m.values()...)).Err()
 	if err != redis.Nil && err != nil {
-		return fmt.Errorf("script produce realtime msg failed, err: %s", err)
+		return fmt.Errorf("script produce delay msg failed, err: %s", err)
 	}
 	return nil
 }
