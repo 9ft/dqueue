@@ -4,12 +4,15 @@ import (
 	"context"
 
 	"github.com/redis/go-redis/v9"
+	"golang.org/x/time/rate"
 )
 
 // Queue defines a Queue.
 type Queue struct {
 	opts
 	rdb
+
+	lim *rate.Limiter
 
 	shutdownFunc context.CancelFunc
 	done         chan struct{}
@@ -24,6 +27,7 @@ func New(options ...func(*Queue)) *Queue {
 	q := Queue{
 		opts: defaultOpts(),
 		rdb:  rdb{redisPrefix: "dq"},
+		lim:  rate.NewLimiter(rate.Inf, 0),
 	}
 
 	for _, opt := range options {

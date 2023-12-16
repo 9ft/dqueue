@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
+	"golang.org/x/time/rate"
 )
 
 type opts struct {
@@ -144,5 +145,11 @@ func WithRedisKeyPrefix(prefix string) func(*Queue) {
 func WithMetric(m Metric) func(*Queue) {
 	return func(q *Queue) {
 		q.metric = m
+	}
+}
+
+func WithLimiter(limit rate.Limit, burst int) func(*Queue) {
+	return func(q *Queue) {
+		q.lim = rate.NewLimiter(limit, burst)
 	}
 }

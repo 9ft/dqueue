@@ -3,12 +3,14 @@ package dq
 import (
 	"context"
 	"fmt"
+	"math"
 	"strconv"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"golang.org/x/time/rate"
 )
 
 func TestConsume(t *testing.T) {
@@ -298,4 +300,56 @@ func TestGracefulShutdownWithError(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 	assert.ErrorIs(t, q.Close(ctx), context.DeadlineExceeded)
+}
+
+func TestConsumeLimit(t *testing.T) {
+	// init
+	interval := 20 * time.Millisecond
+	q := New(append(testOpts(t),
+		WithConsumerWorkerNum(2),
+		WithConsumerWorkerInterval(10*time.Millisecond),
+		WithLimiter(rate.Every(interval), 1),
+		WithLogMode(Trace),
+	)...)
+	defer t.Cleanup(func() { cleanup(t, q) })
+
+	// consume
+	var dataCh = make(chan string)
+	q.Consume(HandlerFunc(func(ctx context.Context, m *Message) error {
+		// t.Log("consume:", m.ID)
+		dataCh <- m.ID
+		return nil
+	}))
+
+	// produce
+	num := 5
+	var sendIDs []string
+	for i := 0; i < num; i++ {
+		id, err := q.Produce(context.Background(), &ProducerMessage{
+			Payload: []byte("ready_" + strconv.Itoa(i)),
+		})
+		assert.Nil(t, err)
+		sendIDs = append(sendIDs, id)
+	}
+
+	go func() {
+		lastRecv := time.Now()
+		first := true
+		for data := range dataCh {
+			since := time.Since(lastRecv)
+			lastRecv = time.Now()
+
+			t.Log("recv:", data, since)
+			if first {
+				first = false
+				continue
+			}
+
+			if math.Abs(float64(interval-since)) > 0.1*float64(interval) {
+				t.Errorf("consume interval not match, actual: %v, want: %v", since, interval)
+			}
+		}
+	}()
+
+	<-time.After(100 * time.Millisecond)
 }

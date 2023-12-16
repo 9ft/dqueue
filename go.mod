@@ -6,6 +6,7 @@ require (
 	github.com/google/uuid v1.3.0
 	github.com/redis/go-redis/v9 v9.0.5
 	github.com/stretchr/testify v1.8.1
+	golang.org/x/time v0.5.0
 )
 
 require (

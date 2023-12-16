@@ -56,6 +56,11 @@ func (q *Queue) consume(ctx context.Context, h Handler) {
 					}
 				}
 
+				if err := q.lim.Wait(ctx); err != nil {
+					q.log(ctx, Warn, "limiter wait failed, err: %v", err)
+					continue
+				}
+
 				err := q.process(h)
 				if err == takeNil {
 					continue
