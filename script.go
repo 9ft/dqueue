@@ -2,6 +2,7 @@ package dq
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -67,31 +68,53 @@ func (r *rdb) runZsetToList(ctx context.Context, zset, list string, until time.T
 // 3. INCRBY msg
 // 4. ZADD retry
 // 5. HGETALL msg
-var scriptTakeMsg = redis.NewScript(`
+var scriptTakeMsg = redis.NewScript(
+	fmt.Sprintf(`
 local id = redis.call('RPOP', KEYS[1]);
 if id == false then
-	return nil;
+	return {'%s'};
 end
 
 local exist = redis.call('EXISTS', KEYS[3] .. ':' .. id);
 if exist == 0 then
-	return nil;
+	return {'%s'};
 end
 
 local cnt = redis.call('HINCRBY', KEYS[3] .. ':' .. id, 'deliver_cnt', 1);
 if cnt-1 > tonumber(ARGV[2]) then
 	redis.call('DEL', KEYS[3] .. ':' .. id);
-	return nil;
+	return {'%s'};
 end
 
 redis.call('ZADD', KEYS[2], ARGV[1], id);
-return redis.call('HGETALL', KEYS[3] .. ':' .. id);`)
+return redis.call('HGETALL', KEYS[3] .. ':' .. id);`,
+		listEmpty.Error(),
+		dataMiss.Error(),
+		deliverCntExceed.Error()))
+
+var (
+	listEmpty        = errors.New("list empty")
+	dataMiss         = errors.New("data miss")
+	deliverCntExceed = errors.New("deliver cnt exceed")
+)
 
 func (r *rdb) runTakeMsg(ctx context.Context, list, retry, data string, retryInterval time.Duration, retryTimes int) ([]string, error) {
 	retryAt := time.Now().Add(retryInterval)
 	s, err := scriptTakeMsg.Run(ctx, r, []string{list, retry, data}, retryAt.UnixMilli(), retryTimes).StringSlice()
 	if err != nil && err != redis.Nil {
 		return nil, fmt.Errorf("script run failed, err: %v", err)
+	}
+	if len(s) == 1 {
+		switch s[0] {
+		case listEmpty.Error():
+			return nil, listEmpty
+		case dataMiss.Error():
+			return nil, dataMiss
+		case deliverCntExceed.Error():
+			return nil, deliverCntExceed
+		default:
+			return nil, fmt.Errorf("script run failed, s[0]: %v", s[0])
+		}
 	}
 	return s, nil
 }

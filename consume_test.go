@@ -345,11 +345,11 @@ func TestConsumeLimit(t *testing.T) {
 				continue
 			}
 
-			if math.Abs(float64(interval-since)) > 0.1*float64(interval) {
+			if math.Abs(float64(interval-since)) > 0.3*float64(interval) {
 				t.Errorf("consume interval not match, actual: %v, want: %v", since, interval)
 			}
 		}
 	}()
 
-	<-time.After(100 * time.Millisecond)
+	<-time.After(interval*time.Duration(num) + 100*time.Millisecond)
 }

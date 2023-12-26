@@ -41,36 +41,17 @@ func (q *Queue) consume(ctx context.Context, h Handler) {
 
 	for i := 0; i < q.consumeWorkerNum; i++ {
 		go func(i int) {
-			ticker := time.NewTicker(q.consumeWorkerInterval)
-			defer ticker.Stop()
-
-			lastOk := make(chan struct{}, 1)
-			for {
-				select {
-				case <-ctx.Done():
-					wg.Done()
-					return
-				case <-lastOk:
-				case <-ticker.C:
-					for ; len(lastOk) > 0; <-lastOk {
-					}
-				}
-
-				if err := q.lim.Wait(ctx); err != nil {
-					q.log(ctx, Warn, "limiter wait failed, err: %v", err)
-					continue
-				}
-
-				err := q.process(h)
-				if err == takeNil {
-					continue
-				}
-				if err != nil {
-					q.log(context.Background(), Warn, "process message failed, err: %v", err)
-					continue
-				}
-
-				lastOk <- struct{}{}
+			switch {
+			case q.lim != nil:
+				// Limiter Mode consume message with limiter, consume next message after limiter wait.
+				q.consumeWithLimiter(ctx, h)
+				wg.Done()
+			default:
+				// Ticker Mode consume message with ticker,
+				// 	if success, consume next message immediately.
+				// 	if failed, consume next message after consumeWorkerInterval.
+				q.consumeWithTicker(ctx, h)
+				wg.Done()
 			}
 		}(i)
 	}
@@ -80,7 +61,72 @@ func (q *Queue) consume(ctx context.Context, h Handler) {
 	q.done <- struct{}{}
 }
 
-var takeNil = errors.New("take nil")
+func (q *Queue) consumeWithTicker(ctx context.Context, h Handler) {
+	ticker := time.NewTicker(q.consumeWorkerInterval)
+	defer ticker.Stop()
+
+	immed := make(chan struct{}, 1)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-immed:
+		case <-ticker.C:
+			for ; len(immed) > 0; <-immed {
+			}
+		}
+
+		err := q.process(h)
+		if errors.Is(err, skip) {
+			immed <- struct{}{}
+			continue
+		}
+		if errors.Is(err, wait) {
+			continue
+		}
+		if err != nil {
+			q.log(context.Background(), Warn, "process message failed, err: %v", err)
+			continue
+		}
+
+		immed <- struct{}{}
+	}
+}
+
+func (q *Queue) consumeWithLimiter(ctx context.Context, h Handler) {
+	immed := make(chan struct{}, 1)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-immed:
+		default:
+			if err := q.lim.Wait(ctx); err != nil {
+				q.log(ctx, Warn, "limiter wait failed, err: %v", err)
+				continue
+			}
+			for ; len(immed) > 0; <-immed {
+			}
+		}
+
+		err := q.process(h)
+		if errors.Is(err, skip) {
+			immed <- struct{}{}
+			continue
+		}
+		if errors.Is(err, wait) {
+			continue
+		}
+		if err != nil {
+			q.log(context.Background(), Warn, "process message failed, err: %v", err)
+		}
+	}
+}
+
+var (
+	skip = errors.New("skip")
+	wait = errors.New("wait")
+)
 
 func (q *Queue) process(h Handler) error {
 	rq := q.key(kReady) // list
@@ -89,12 +135,17 @@ func (q *Queue) process(h Handler) error {
 
 	ctx := context.Background()
 	s, err := q.rdb.runTakeMsg(ctx, rq, pq, mq, q.retryInterval, q.retryTimes)
-	if err != nil {
-		return fmt.Errorf("take message failed, err: %v", err)
-	}
 
-	if s == nil {
-		return takeNil
+	if err != nil {
+		switch {
+		case errors.Is(err, dataMiss),
+			errors.Is(err, deliverCntExceed):
+			return skip
+		case errors.Is(err, listEmpty):
+			return wait
+		default:
+			return fmt.Errorf("take message failed, err: %v", err)
+		}
 	}
 
 	var m Message
